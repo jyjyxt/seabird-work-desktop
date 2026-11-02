@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="sea" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#658fc7"/>
+      <stop offset=".55" stop-color="#507ab6"/>
+      <stop offset="1" stop-color="#365f9a"/>
+    </linearGradient>
+    <linearGradient id="wing" x1="0" y1="0" x2=".9" y2="1">
+      <stop stop-color="#fffdf5"/>
+      <stop offset="1" stop-color="#d6eff1"/>
+    </linearGradient>
+    <linearGradient id="sun" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#ffe5a1"/>
+      <stop offset="1" stop-color="#ffb870"/>
+    </linearGradient>
+  </defs>
+  <g transform="translate(92 92) scale(.82)">
+    <rect width="1024" height="1024" rx="240" fill="url(#sea)"/>
+    <!-- A gull gliding above the sea. The wings and tail form one continuous silhouette. -->
+    <path fill="url(#wing)" transform="translate(90 15) scale(.93)" d="M155 308c122 21 230 75 310 158 34-59 72-105 118-137 62-43 142-65 234-65 25 0 30 15 7 26-72 34-127 70-165 114-22 25-37 55-47 85 35-14 70-20 103-17 22 2 25 14 6 24-29 16-55 37-76 62-23 27-42 58-56 92-8 19-22 19-30 0-21-49-48-89-87-125C376 434 263 371 150 338c-25-7-20-35 5-30Z"/>
+    <!-- The sun rises on the left as the gull flies toward it. -->
+    <path d="M160 724a142 142 0 0 1 284 0Z" fill="url(#sun)"/>
+    <path d="M222 737c92-34 179-34 269 0s177 34 311-12" fill="none" stroke="#9de2df" stroke-width="26" stroke-linecap="round"/>
+  </g>
+</svg>

@@ -1,3 +1,4 @@
+mod agent_adapter;
 mod bridge;
 mod setup;
 
@@ -16,7 +17,7 @@ use serde::Serialize;
 use std::{
     collections::HashMap,
     fs,
-    io::{Read, Write},
+    io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{Arc, Mutex},
@@ -280,6 +281,7 @@ fn start_agent(
     id: String,
     prompt: String,
     run_id: String,
+    session_id: Option<String>,
 ) -> Result<(), String> {
     if prompt.trim().is_empty() {
         return Err("请输入任务内容".into());
@@ -296,15 +298,7 @@ fn start_agent(
     }
     let executable = find_agent(&id).ok_or_else(|| format!("未找到 {id}，请检查安装和 PATH"))?;
     let mut command = Command::new(executable);
-    match id.as_str() {
-        "codex" => {
-            command.args(["exec", "--skip-git-repo-check", "--color", "never", "-"]);
-        }
-        "claude" => {
-            command.args(["--print", "--output-format", "text"]);
-        }
-        _ => return Err("不支持的 Agent".into()),
-    }
+    command.args(agent_adapter::args(&id, session_id.as_deref())?);
     let mut child = command
         .current_dir(root)
         .stdin(Stdio::piped())
@@ -339,7 +333,29 @@ fn start_agent(
         let error_app = app.clone();
         let error_id = run_id.clone();
         let error_thread = thread::spawn(move || forward_output(stderr, &error_app, &error_id));
-        forward_output(stdout, &app, &run_id);
+        let mut protocol_failure = None;
+        for line in BufReader::new(stdout).lines() {
+            match line {
+                Ok(line) if !line.is_empty() => {
+                    for event in agent_adapter::parse(&id, &line) {
+                        match event {
+                            agent_adapter::Event::Session(session) => {
+                                emit_agent(&app, &run_id, "session", session)
+                            }
+                            agent_adapter::Event::Output(text) => {
+                                emit_agent(&app, &run_id, "output", text)
+                            }
+                            agent_adapter::Event::Failure(text) => protocol_failure = Some(text),
+                        }
+                    }
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    protocol_failure = Some(format!("读取 Agent 输出失败：{error}"));
+                    break;
+                }
+            }
+        }
         let status = loop {
             let result = child
                 .lock()
@@ -356,10 +372,17 @@ fn start_agent(
         }
         let _ = input_thread.join();
         let _ = error_thread.join();
-        match status {
-            Ok(status) if status.success() => emit_agent(&app, &run_id, "done", "任务完成".into()),
-            Ok(status) => emit_agent(&app, &run_id, "error", format!("Agent 已退出：{status}")),
-            Err(error) => emit_agent(&app, &run_id, "error", format!("无法获取执行结果：{error}")),
+        match (protocol_failure, status) {
+            (Some(error), _) => emit_agent(&app, &run_id, "error", error),
+            (None, Ok(status)) if status.success() => {
+                emit_agent(&app, &run_id, "done", "本轮完成".into())
+            }
+            (None, Ok(status)) => {
+                emit_agent(&app, &run_id, "error", format!("Agent 已退出：{status}"))
+            }
+            (None, Err(error)) => {
+                emit_agent(&app, &run_id, "error", format!("无法获取执行结果：{error}"))
+            }
         }
     });
     Ok(())

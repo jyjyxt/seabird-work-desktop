@@ -2651,6 +2651,7 @@ name = "seabird-workbench"
 version = "0.1.0"
 dependencies = [
  "dirs",
+ "libc",
  "rusqlite",
  "serde",
  "serde_json",

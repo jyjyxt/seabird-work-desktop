@@ -1,5 +1,6 @@
 mod agent_adapter;
 mod bridge;
+mod interactive;
 mod setup;
 
 pub fn run_setup(workspace: Option<&str>) -> Result<(String, bool), String> {
@@ -634,10 +635,84 @@ fn database_path(app: tauri::AppHandle) -> Result<String, String> {
         .to_string_lossy()
         .into_owned())
 }
+#[tauri::command]
+fn list_conversations(
+    app: tauri::AppHandle,
+    root: String,
+) -> Result<Vec<serde_json::Value>, String> {
+    let conn = database(&app)?;
+    read_conversations(&conn, &root)
+}
+fn read_conversations(conn: &Connection, root: &str) -> Result<Vec<serde_json::Value>, String> {
+    ensure_conversations(conn)?;
+    let mut stmt = conn
+        .prepare("SELECT data FROM agent_conversations WHERE root = ?1 ORDER BY updated_at DESC")
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([root], |row| row.get::<_, String>(0))
+        .map_err(|e| e.to_string())?;
+    let mut result = Vec::new();
+    for row in rows {
+        let value = row.map_err(|e| e.to_string())?;
+        result.push(serde_json::from_str(&value).map_err(|e| e.to_string())?);
+    }
+    Ok(result)
+}
+#[tauri::command]
+fn save_conversation(
+    app: tauri::AppHandle,
+    root: String,
+    conversation: serde_json::Value,
+) -> Result<(), String> {
+    let conn = database(&app)?;
+    write_conversation(&conn, &root, &conversation)
+}
+fn ensure_conversations(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch("CREATE TABLE IF NOT EXISTS agent_conversations (id TEXT PRIMARY KEY, root TEXT NOT NULL, data TEXT NOT NULL, updated_at INTEGER NOT NULL)").map_err(|e| e.to_string())
+}
+fn write_conversation(
+    conn: &Connection,
+    root: &str,
+    conversation: &serde_json::Value,
+) -> Result<(), String> {
+    let id = conversation["id"]
+        .as_str()
+        .filter(|id| !id.is_empty() && id.len() <= 128)
+        .ok_or("会话标识无效")?;
+    let data = serde_json::to_string(&conversation).map_err(|e| e.to_string())?;
+    if data.len() > 2_000_000 {
+        return Err("对话记录过长".into());
+    }
+    ensure_conversations(conn)?;
+    conn.execute("INSERT INTO agent_conversations (id, root, data, updated_at) VALUES (?1, ?2, ?3, ?4) ON CONFLICT(id) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at WHERE root = excluded.root", rusqlite::params![id, root, data, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as i64]).map_err(|e| e.to_string())?;
+    Ok(())
+}
+#[cfg(test)]
+mod conversation_tests {
+    use super::*;
+    use serde_json::json;
+    #[test]
+    fn saves_latest_session_and_isolates_workspaces() {
+        let conn = Connection::open_in_memory().unwrap();
+        let first = json!({"id":"local-1","sessionId":"native-1","output":"first"});
+        write_conversation(&conn, "/one", &first).unwrap();
+        let updated = json!({"id":"local-1","sessionId":"native-1","output":"continued"});
+        write_conversation(&conn, "/one", &updated).unwrap();
+        assert_eq!(
+            read_conversations(&conn, "/one").unwrap(),
+            vec![updated.clone()]
+        );
+        assert!(read_conversations(&conn, "/two").unwrap().is_empty());
+        write_conversation(&conn, "/two", &json!({"id":"local-1","output":"other"})).unwrap();
+        assert_eq!(read_conversations(&conn, "/one").unwrap(), vec![updated]);
+        assert!(read_conversations(&conn, "/two").unwrap().is_empty());
+    }
+}
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .manage(AgentProcesses::default())
+        .manage(interactive::Processes::default())
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             default_workspace,
@@ -651,6 +726,11 @@ pub fn run() {
             write_file,
             detect_agents,
             start_agent,
+            interactive::start_interactive,
+            interactive::respond_interactive,
+            interactive::stop_interactive,
+            list_conversations,
+            save_conversation,
             stop_agent,
             bridge_config,
             register_bridge,

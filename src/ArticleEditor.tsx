@@ -1,17 +1,17 @@
 import { useRef, useState } from 'react';
 import { convertFileSrc, invoke } from '@tauri-apps/api/core';
 import { open } from '@tauri-apps/plugin-dialog';
-import { Eye, Heading2, Heading3, ImagePlus, Sparkles, Video } from 'lucide-react';
+import { Eye, Heading2, Heading3, ImagePlus, Pencil, Sparkles, Video } from 'lucide-react';
 import { articleHtml, articleMarkdown, mediaFileUrl } from './articleFormat';
 
 type MediaFile = { path: string; name: string; kind: 'image' | 'video' };
-type Props = { root: string; desktop: boolean; title: string; body: string; onTitle: (value: string) => void; onBody: (value: string) => void; onBusy: (busy: boolean) => void; onMessage: (value: string) => void; onError: (value: string) => void; isCurrent: () => boolean; onEditSelection: (selection: { start: number; end: number; text: string }, body: string) => void };
+type Props = { root: string; desktop: boolean; title: string; body: string; initialPreview: boolean; onTitle: (value: string) => void; onBody: (value: string) => void; onBusy: (busy: boolean) => void; onMessage: (value: string) => void; onError: (value: string) => void; onOpenLink: (url: string) => void; isCurrent: () => boolean; onEditSelection: (selection: { start: number; end: number; text: string }, body: string) => void };
 
-export default function ArticleEditor({ root, desktop, title, body, onTitle, onBody, onBusy, onMessage, onError, isCurrent, onEditSelection }: Props) {
+export default function ArticleEditor({ root, desktop, title, body, initialPreview, onTitle, onBody, onBusy, onMessage, onError, onOpenLink, isCurrent, onEditSelection }: Props) {
   const input = useRef<HTMLTextAreaElement>(null);
   const currentBody = useRef(body);
   currentBody.current = body;
-  const [preview, setPreview] = useState(false);
+  const [preview, setPreview] = useState(initialPreview);
   const [hasSelection, setHasSelection] = useState(false);
   const selection = () => ({ start: input.current?.selectionStart ?? currentBody.current.length, end: input.current?.selectionEnd ?? currentBody.current.length });
   const insert = (text: string, range = selection(), block = false) => {
@@ -60,18 +60,18 @@ export default function ArticleEditor({ root, desktop, title, body, onTitle, onB
     return convertFileSrc(path);
   };
   return <>
-    <input className="content-title-input" aria-label="文章标题" placeholder="文章标题" value={title} onChange={e => onTitle(e.target.value)}/>
+    {preview ? <h1 className="article-reader-title">{title || '未命名文章'}</h1> : <input className="content-title-input" aria-label="文章标题" placeholder="文章标题" value={title} onChange={e => onTitle(e.target.value)}/>}
     <div className="article-editor-toolbar" role="toolbar" aria-label="文章编辑工具">
-      <button type="button" onMouseDown={e => e.preventDefault()} onClick={() => heading(2)} disabled={preview} title="二级标题"><Heading2 size={16}/> 标题</button>
-      <button type="button" onMouseDown={e => e.preventDefault()} onClick={() => heading(3)} disabled={preview} title="三级标题"><Heading3 size={16}/> 小标题</button>
-      <button type="button" onMouseDown={e => e.preventDefault()} onClick={() => void importFile('image')} disabled={preview}><ImagePlus size={16}/> 图片</button>
-      <button type="button" onMouseDown={e => e.preventDefault()} onClick={() => void importFile('video')} disabled={preview}><Video size={16}/> 视频</button>
-      <button type="button" onMouseDown={e => e.preventDefault()} disabled={preview || !hasSelection} onClick={() => { const range = selection(); const text = currentBody.current.slice(range.start, range.end); if (text) onEditSelection({ ...range, text }, currentBody.current); }}><Sparkles size={16}/> 修改选中内容</button>
-      <button type="button" className={preview ? 'active' : ''} onClick={() => setPreview(value => !value)} aria-pressed={preview}><Eye size={16}/> {preview ? '编辑' : '预览'}</button>
+      {!preview && <><button type="button" onMouseDown={e => e.preventDefault()} onClick={() => heading(2)} title="二级标题"><Heading2 size={16}/> 标题</button>
+      <button type="button" onMouseDown={e => e.preventDefault()} onClick={() => heading(3)} title="三级标题"><Heading3 size={16}/> 小标题</button>
+      <button type="button" onMouseDown={e => e.preventDefault()} onClick={() => void importFile('image')}><ImagePlus size={16}/> 图片</button>
+      <button type="button" onMouseDown={e => e.preventDefault()} onClick={() => void importFile('video')}><Video size={16}/> 视频</button>
+      <button type="button" onMouseDown={e => e.preventDefault()} disabled={!hasSelection} onClick={() => { const range = selection(); const text = currentBody.current.slice(range.start, range.end); if (text) onEditSelection({ ...range, text }, currentBody.current); }}><Sparkles size={16}/> 修改选中内容</button></>}
+      <button type="button" className={preview ? 'article-edit-action' : ''} onClick={() => { setHasSelection(false); setPreview(value => !value); }}>{preview ? <Pencil size={16}/> : <Eye size={16}/>} {preview ? '编辑文章' : '预览'}</button>
       <span className="article-editor-spacer"/>
       <button type="button" onClick={() => void copy('markdown')}>复制 Markdown</button>
       <button type="button" onClick={() => void copy('html')}>复制 HTML</button>
     </div>
-    {preview ? <div className="article-preview" onClick={e => { if ((e.target as HTMLElement).closest('a')) e.preventDefault(); }} dangerouslySetInnerHTML={{ __html: articleHtml('', body, previewFile) }}/> : <textarea ref={input} className="content-body-input" aria-label="文章正文" placeholder="写下你的想法……" value={body} onSelect={e => setHasSelection(e.currentTarget.selectionStart !== e.currentTarget.selectionEnd)} onChange={e => onBody(e.target.value)}/>}
+    {preview ? <div className="article-preview" onClick={e => { const link = (e.target as HTMLElement).closest('a'); if (!link) return; e.preventDefault(); const href = link.getAttribute('href') || ''; if (/^https?:\/\//i.test(href)) onOpenLink(href); }} dangerouslySetInnerHTML={{ __html: articleHtml('', body, previewFile) }}/> : <textarea ref={input} className="content-body-input" aria-label="文章正文" placeholder="写下你的想法……" value={body} onSelect={e => setHasSelection(e.currentTarget.selectionStart !== e.currentTarget.selectionEnd)} onChange={e => onBody(e.target.value)}/>}
   </>;
 }

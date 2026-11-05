@@ -27,6 +27,11 @@ export default function PublicationCalendar({ root, desktop, articles, initialAr
   const busyRef = useRef(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
+  useEffect(() => {
+    if (!notice) return;
+    const timer = window.setTimeout(() => setNotice(''), 10_000);
+    return () => window.clearTimeout(timer);
+  }, [notice]);
   const [form, setForm] = useState<Form | null>(() => initialArticleId ? { articleId: String(initialArticleId), dateTime: localInput(now), original: null } : null);
   useEffect(() => { if (initialArticleId) onConsumed(); }, []);
   const load = async () => desktop ? await invoke<Publication[]>('publication_list', { root }) : previewLoad(root, articles);

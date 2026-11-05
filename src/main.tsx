@@ -36,6 +36,7 @@ function App() {
   const [agents, setAgents] = useState<Agent[]>([]);
   const [entries, setEntries] = useState<Record<string, Entry[]>>({});
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+  const [rootExpanded, setRootExpanded] = useState(false);
   const [file, setFile] = useState('');
   const [content, setContent] = useState('');
   const [saved, setSaved] = useState('');
@@ -97,6 +98,7 @@ function App() {
   const activeRun = useRef('');
   const desktop = isTauri();
   const dirty = content !== saved;
+  useEffect(() => { if (view === 'files') setRootExpanded(true); }, [view]);
 
   const fail = (e: unknown) => setNotice(errorText(e));
   const detect = useCallback(async () => { if (!desktop) return; try { setAgents(await invoke<Agent[]>('detect_agents')); } catch (e) { fail(e); } }, [desktop]);
@@ -262,9 +264,9 @@ function App() {
       <div className="sidebar-scroll"><div className="side-label">工作空间 <button onClick={chooseFolder} title="选择工作目录"><Plus size={15}/></button></div>
         <button className="workspace-switch" onClick={chooseFolder}><span className="workspace-icon"><FolderOpen size={16}/></span><span className="workspace-name"><b>{root ? basename(root) : '选择工作目录'}</b><small>{root ? '本地工作空间' : '打开一个本地文件夹'}</small></span><ChevronDown size={15}/></button>
         <div className="side-label navigation-label">工作台</div>
-        <nav><button className={`nav-item ${view === 'home' ? 'active' : ''}`} onClick={() => setView('home')}><Layers2 size={17}/> 概览 <span>⌘ 1</span></button><button className={`nav-item ${view === 'agent' ? 'active' : ''}`} onClick={() => setView('agent')}><Bot size={17}/> Agent</button><button className={`nav-item ${view === 'files' ? 'active' : ''}`} onClick={() => setView('files')}><Folder size={17}/> 文件 <span>⌘ 2</span></button><button className={`nav-item ${view === 'database' ? 'active' : ''}`} onClick={() => setView('database')}><Database size={17}/> 数据库 <span>⌘ 3</span></button></nav>
+        <nav><button className={`nav-item ${view === 'home' ? 'active' : ''}`} onClick={() => setView('home')}><Layers2 size={17}/> 概览 <span>⌘ 1</span></button><button className={`nav-item ${view === 'agent' ? 'active' : ''}`} onClick={() => setView('agent')}><Bot size={17}/> Agent</button><button className={`nav-item ${view === 'files' ? 'active' : ''}`} onClick={() => { setView('files'); setRootExpanded(true); }}><Folder size={17}/> 文件 <span>⌘ 2</span></button><button className={`nav-item ${view === 'database' ? 'active' : ''}`} onClick={() => setView('database')}><Database size={17}/> 数据库 <span>⌘ 3</span></button></nav>
         <div className="side-label files-label">文件浏览器 <button onClick={() => root && loadFolder(root, root).catch(fail)} title="刷新文件"><RefreshCw size={13}/></button></div>
-        {root ? <div className="file-tree"><div className="tree-root"><ChevronDown size={13}/><span>{basename(root)}</span></div>{tree(root)}</div> : <p className="side-empty">打开文件夹后，文件会显示在这里。</p>}
+        {root ? <div className="file-tree"><button className="tree-root" aria-expanded={rootExpanded} onClick={() => setRootExpanded(open => !open)}>{rootExpanded ? <ChevronDown size={13}/> : <ChevronRight size={13}/>}<span>{basename(root)}</span></button>{rootExpanded && tree(root)}</div> : <p className="side-empty">打开文件夹后，文件会显示在这里。</p>}
       </div><div className="sidebar-bottom"><div className="status-dot"/><span>本地工作台</span><span className="sidebar-version">v0.1</span></div>
     </aside>
     <main className="main"><header className="topbar"><div className="breadcrumbs"><span>工作空间</span><ChevronRight size={14}/><strong>{view === 'home' ? '概览' : view === 'agent' ? 'Agent' : view === 'files' ? '文件' : '数据库'}</strong></div><div className="top-actions"><span className="local-badge"><span/> 本地运行</span><button className="icon-button" title="刷新工具状态" onClick={detect}><RefreshCw size={16}/></button></div></header>

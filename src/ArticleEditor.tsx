@@ -1,18 +1,18 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { convertFileSrc, invoke } from '@tauri-apps/api/core';
 import { open } from '@tauri-apps/plugin-dialog';
-import { Eye, Heading2, Heading3, ImagePlus, Pencil, Sparkles, Video } from 'lucide-react';
+import { Heading2, Heading3, ImagePlus, Sparkles, Video } from 'lucide-react';
 import { articleHtml, articleMarkdown, mediaFileUrl } from './articleFormat';
 
 type MediaFile = { path: string; name: string; kind: 'image' | 'video' };
-type Props = { root: string; desktop: boolean; title: string; body: string; initialPreview: boolean; onTitle: (value: string) => void; onBody: (value: string) => void; onBusy: (busy: boolean) => void; onMessage: (value: string) => void; onError: (value: string) => void; onOpenLink: (url: string) => void; isCurrent: () => boolean; onEditSelection: (selection: { start: number; end: number; text: string }, body: string) => void };
+type Props = { root: string; desktop: boolean; title: string; body: string; preview: boolean; onTitle: (value: string) => void; onBody: (value: string) => void; onBusy: (busy: boolean) => void; onMessage: (value: string) => void; onError: (value: string) => void; onOpenLink: (url: string) => void; isCurrent: () => boolean; onEditSelection: (selection: { start: number; end: number; text: string }, body: string) => void };
 
-export default function ArticleEditor({ root, desktop, title, body, initialPreview, onTitle, onBody, onBusy, onMessage, onError, onOpenLink, isCurrent, onEditSelection }: Props) {
+export default function ArticleEditor({ root, desktop, title, body, preview, onTitle, onBody, onBusy, onMessage, onError, onOpenLink, isCurrent, onEditSelection }: Props) {
   const input = useRef<HTMLTextAreaElement>(null);
   const currentBody = useRef(body);
   currentBody.current = body;
-  const [preview, setPreview] = useState(initialPreview);
   const [hasSelection, setHasSelection] = useState(false);
+  useEffect(() => { if (preview) setHasSelection(false); }, [preview]);
   const selection = () => ({ start: input.current?.selectionStart ?? currentBody.current.length, end: input.current?.selectionEnd ?? currentBody.current.length });
   const insert = (text: string, range = selection(), block = false) => {
     const value = currentBody.current;
@@ -67,7 +67,6 @@ export default function ArticleEditor({ root, desktop, title, body, initialPrevi
       <button type="button" onMouseDown={e => e.preventDefault()} onClick={() => void importFile('image')}><ImagePlus size={16}/> 图片</button>
       <button type="button" onMouseDown={e => e.preventDefault()} onClick={() => void importFile('video')}><Video size={16}/> 视频</button>
       <button type="button" onMouseDown={e => e.preventDefault()} disabled={!hasSelection} onClick={() => { const range = selection(); const text = currentBody.current.slice(range.start, range.end); if (text) onEditSelection({ ...range, text }, currentBody.current); }}><Sparkles size={16}/> 修改选中内容</button></>}
-      <button type="button" className={preview ? 'article-edit-action' : ''} onClick={() => { setHasSelection(false); setPreview(value => !value); }}>{preview ? <Pencil size={16}/> : <Eye size={16}/>} {preview ? '编辑文章' : '预览'}</button>
       <span className="article-editor-spacer"/>
       <button type="button" onClick={() => void copy('markdown')}>复制 Markdown</button>
       <button type="button" onClick={() => void copy('html')}>复制 HTML</button>

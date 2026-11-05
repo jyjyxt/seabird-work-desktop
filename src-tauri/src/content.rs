@@ -4,6 +4,50 @@ use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, time::Duration};
 use tauri::Manager;
 
+fn source_url(input: &str) -> Result<tauri::Url, String> {
+    let url = tauri::Url::parse(input.trim()).map_err(|_| "链接格式不正确".to_string())?;
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+        return Err("请使用 http 或 https 链接".into());
+    }
+    Ok(url)
+}
+
+#[tauri::command]
+pub async fn content_open_url(url: String) -> Result<(), String> {
+    let url = source_url(&url)?.to_string();
+    tauri::async_runtime::spawn_blocking(move || {
+        #[cfg(target_os = "macos")]
+        let mut command = std::process::Command::new("open");
+        #[cfg(target_os = "linux")]
+        let mut command = std::process::Command::new("xdg-open");
+        #[cfg(target_os = "windows")]
+        let mut command = {
+            let mut command = std::process::Command::new("rundll32.exe");
+            command.arg("url.dll,FileProtocolHandler");
+            command
+        };
+        #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+        {
+            let status = command
+                .arg(url)
+                .status()
+                .map_err(|e| format!("无法打开链接：{e}"))?;
+            if status.success() {
+                Ok(())
+            } else {
+                Err("无法打开链接，请检查浏览器设置".into())
+            }
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+        {
+            let _ = url;
+            Err("当前系统不支持打开链接".into())
+        }
+    })
+    .await
+    .map_err(|e| format!("无法打开链接：{e}"))?
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MediaFile {
     pub path: String,
@@ -598,6 +642,21 @@ pub async fn content_trends() -> Result<TrendResult, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn source_links_only_allow_web_urls() {
+        assert!(source_url(" https://example.com/path?q=1 ").is_ok());
+        assert!(source_url("http://example.com").is_ok());
+        for invalid in [
+            "",
+            "example.com",
+            "file:///tmp/a",
+            "javascript:alert(1)",
+            "https://",
+        ] {
+            assert!(source_url(invalid).is_err(), "{invalid}");
+        }
+    }
+
     #[test]
     fn article_tags_migrate_old_database_and_detect_concurrent_changes() {
         let mut db = Connection::open_in_memory().unwrap();

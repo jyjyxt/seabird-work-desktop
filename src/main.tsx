@@ -3,7 +3,7 @@ import { createRoot } from 'react-dom/client';
 import { invoke, isTauri } from '@tauri-apps/api/core';
 import { open } from '@tauri-apps/plugin-dialog';
 import { listen } from '@tauri-apps/api/event';
-import { ArrowUpRight, Bookmark, Bot, Braces, ChevronDown, ChevronRight, Compass, Database, FileCode2, FileText, Folder, FolderOpen, HardDrive, Layers2, PanelLeft, Play, RefreshCw, Save, Send, X } from 'lucide-react';
+import { ArrowUpRight, Bookmark, Bot, Braces, ChevronDown, ChevronRight, Compass, Database, FileCode2, FileText, Folder, FolderOpen, HardDrive, History, Layers2, PanelLeft, Play, Plus, RefreshCw, Save, Send, Square, Trash2, X } from 'lucide-react';
 import seabirdLogo from './assets/seabird.svg';
 import './styles.css';
 import ContentWorkspace, { type ContentView } from './ContentWorkspace';
@@ -13,7 +13,21 @@ type Agent = { id: string; path: string | null };
 type Result = { columns: string[]; rows: string[][]; message: string };
 type View = ContentView | 'files' | 'database' | 'settings';
 type AgentEvent = { run_id: string; kind: 'output' | 'activity' | 'session' | 'request' | 'request_resolved' | 'done' | 'error'; text: string };
-type Conversation = { id: string; agent: string; sessionId: string; output: string; title: string };
+type ChatMessage = { role: 'user' | 'assistant' | 'activity' | 'system'; text: string };
+type Conversation = { id: string; agent: string; sessionId: string; output: string; title: string; messages?: ChatMessage[] };
+const appendMessage = (messages: ChatMessage[], role: ChatMessage['role'], text: string, merge = false): ChatMessage[] => {
+  const next = messages.slice(-2000);
+  const last = next[next.length - 1];
+  if (merge && last?.role === role) next[next.length - 1] = { ...last, text: last.text + text };
+  else next.push({ role, text });
+  let remaining = 500_000;
+  return next.reverse().flatMap(message => {
+    if (remaining <= 0) return [];
+    const clipped = { ...message, text: message.text.slice(-remaining) };
+    remaining -= clipped.text.length;
+    return [clipped];
+  }).reverse();
+};
 type AgentRequest = { key: string; method: string; params: Record<string, any> };
 type Question = { id: string; label: string; options: string[]; multiple: boolean; secret: boolean };
 function requestQuestions(request: AgentRequest): Question[] {
@@ -51,6 +65,8 @@ function App() {
   const [prompt, setPrompt] = useState('');
   const [taskSuggestion, setTaskSuggestion] = useState('');
   const promptRef = useRef<HTMLTextAreaElement>(null);
+  const transcriptRef = useRef<HTMLDivElement>(null);
+  const followTranscript = useRef(true);
   const taskContext = useRef<(() => string) | null>(null);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
@@ -59,7 +75,10 @@ function App() {
   const conversationIdRef = useRef('');
   const rootRef = useRef(root);
   const pendingSaves = useRef(new Map<string, { root: string; conversation: Conversation }>());
-  const saving = useRef(false);
+  const saving = useRef<Promise<void> | null>(null);
+  const deletingConversations = useRef(false);
+  const [deletingHistory, setDeletingHistory] = useState(false);
+  const historyRef = useRef<HTMLDetailsElement>(null);
   const [requests, setRequests] = useState<AgentRequest[]>([]);
   const request = requests[0] || null;
   const requestPanelRef = useRef<HTMLDivElement>(null);
@@ -69,7 +88,7 @@ function App() {
   useEffect(() => { setAnswers({}); }, [request?.key]);
   const currentConversation = conversations.find(c => c.id === conversationId);
   const agentOutput = currentConversation?.output || '';
-  const sessionId = currentConversation?.sessionId || '';
+  const messages = currentConversation?.messages || [];
   const setCurrentId = (id: string) => { conversationIdRef.current = id; setConversationId(id); };
   const updateConversation = (id: string, fn: (conversation: Conversation) => Conversation) => {
     const old = conversationsRef.current.find(c => c.id === id);
@@ -80,8 +99,7 @@ function App() {
     const workspace = rootRef.current;
     pendingSaves.current.set(`${workspace}\0${next.id}`, { root: workspace, conversation: next });
     if (!saving.current) {
-      saving.current = true;
-      void (async () => {
+      saving.current = (async () => {
         try {
           while (pendingSaves.current.size) {
             const key = pendingSaves.current.keys().next().value as string;
@@ -89,12 +107,14 @@ function App() {
             pendingSaves.current.delete(key);
             try { await invoke<void>('save_conversation', item); } catch (error) { fail(error); }
           }
-        } finally { saving.current = false; }
+        } finally { saving.current = null; }
       })();
     }
   };
   const [agentRunning, setAgentRunning] = useState(false);
   const [agentPanelOpen, setAgentPanelOpen] = useState(false);
+  useEffect(() => { if (agentPanelOpen && followTranscript.current && transcriptRef.current) transcriptRef.current.scrollTop = transcriptRef.current.scrollHeight; }, [agentOutput, messages, agentRunning, agentPanelOpen, conversationId]);
+  useEffect(() => { followTranscript.current = true; if (transcriptRef.current) transcriptRef.current.scrollTop = transcriptRef.current.scrollHeight; }, [conversationId]);
   const [checkingAgents, setCheckingAgents] = useState(false);
   useEffect(() => { if (request && agentPanelOpen) requestPanelRef.current?.focus(); }, [request?.key, agentPanelOpen]);
   const [agentsDetected, setAgentsDetected] = useState(false);
@@ -159,12 +179,12 @@ function App() {
       const data = event.payload;
       if (data.run_id !== activeRun.current) return;
       const current = conversationIdRef.current;
-      if (data.kind === 'output' || data.kind === 'activity') updateConversation(current, c => ({ ...c, output: (c.output + data.text).slice(-500_000) }));
+      if (data.kind === 'output' || data.kind === 'activity') updateConversation(current, c => ({ ...c, messages: appendMessage(c.messages || [], data.kind === 'output' ? 'assistant' : 'activity', data.text, true) }));
       else if (data.kind === 'session') updateConversation(current, c => ({ ...c, sessionId: data.text }));
       else if (data.kind === 'request') { setAgentPanelOpen(true); try { const incoming = JSON.parse(data.text) as AgentRequest; setRequests(previous => previous.some(r => r.key === incoming.key) ? previous : [...previous, incoming]); } catch { setNotice('无法读取 Agent 请求'); } }
       else if (data.kind === 'request_resolved') { setRequests(previous => previous.filter(r => r.key !== data.text)); }
       else {
-        updateConversation(current, c => ({ ...c, output: c.output + `\n${stopRequested.current ? '任务已停止' : data.text}\n` }));
+        if (stopRequested.current || data.kind === 'error') updateConversation(current, c => ({ ...c, messages: appendMessage(c.messages || [], 'system', stopRequested.current ? '任务已停止' : data.text) }));
         setRequests([]);
         stopRequested.current = false;
         setStoppingAgent(false);
@@ -190,13 +210,13 @@ function App() {
     let disposed = false;
     loadFolder(root, root).catch(fail);
     setCurrentId(''); conversationsRef.current = []; setConversations([]); setHistoryLoading(true);
-    invoke<Conversation[]>('list_conversations', { root }).then(items => { if (!disposed) { conversationsRef.current = items; setConversations(items); setHistoryLoading(false); } }).catch(error => { if (!disposed) { setHistoryLoading(false); fail(error); } });
+    invoke<Conversation[]>('list_conversations', { root }).then(items => { if (!disposed) { conversationsRef.current = items; setConversations(items); if (items.length && !conversationIdRef.current && !taskContext.current) { setCurrentId(items[0].id); setSelectedAgent(items[0].agent); } setHistoryLoading(false); } }).catch(error => { if (!disposed) { setHistoryLoading(false); fail(error); } });
     return () => { disposed = true; };
   }, [root, desktop, loadFolder]);
   const confirmDiscard = () => !dirty || window.confirm('当前文件有未保存的修改，确定放弃吗？');
   const chooseFolder = async () => {
     if (!desktop) { setNotice('请在桌面应用中选择本地文件夹。'); return; }
-    if (agentRunning || connecting) { setNotice('正在执行任务或连接 Agent，请结束后再切换目录。'); return; }
+    if (agentRunning || connecting || deletingConversations.current) { setNotice('正在执行任务或连接 Agent，请结束后再切换目录。'); return; }
     if (contentBusy.current) { setNotice('正在保存内容或导入文件，请完成后再切换目录。'); return; }
     if (!confirmDiscard()) return;
     if (contentDirty.current && !window.confirm('素材或文章有未保存的修改，切换目录将丢失这些修改，确定继续吗？')) return;
@@ -218,24 +238,47 @@ function App() {
   const toggleFolder = async (path: string) => { if (!expanded[path]) { try { await loadFolder(root, path); } catch (e) { fail(e); return; } } setExpanded(p => ({ ...p, [path]: !p[path] })); };
   const chooseAgent = (id: string) => {
     if (agentRunning || id === selectedAgent) return;
+    if (conversationIdRef.current && !window.confirm('切换 Agent 会开始新会话，确定继续吗？')) return;
     setSelectedAgent(id); setCurrentId(''); setRequests([]);
   };
   const runAgent = async () => {
-    if (!root || !prompt.trim() || agentRunning) return;
+    if (!root || !prompt.trim() || agentRunning || activeRun.current || deletingConversations.current) return;
     const runId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
     let conversation = conversationsRef.current.find(c => c.id === conversationIdRef.current);
     if (!conversation) {
-      conversation = { id: runId, agent: selectedAgent, sessionId: '', output: '', title: prompt.trim().slice(0, 40) };
+      conversation = { id: runId, agent: selectedAgent, sessionId: '', output: '', title: prompt.trim().slice(0, 40), messages: [] };
       conversationsRef.current = [conversation, ...conversationsRef.current];
       setConversations(conversationsRef.current); setCurrentId(conversation.id);
     }
     const current = conversation;
     activeRun.current = runId; stopRequested.current = false;
     const task = prompt.trim();
-    updateConversation(current.id, c => ({ ...c, output: `${c.output}${c.output ? '\n' : ''}你：${task}\n\n${agentInfo[c.agent].name}：\n`.slice(-500_000) }));
+    let attachedContext: string;
+    try { attachedContext = taskContext.current?.() || ''; }
+    catch (e) { activeRun.current = ''; fail(e); return; }
+    followTranscript.current = true;
+    updateConversation(current.id, c => ({ ...c, messages: appendMessage(c.messages || [], 'user', task) }));
+    setPrompt(''); setTaskSuggestion(''); taskContext.current = null;
     setAgentRunning(true);
-    try { const context = `\n\nSeabird 可执行文件：${JSON.stringify(executablePath)}；工作目录：${JSON.stringify(root)}。如需读取或保存 Seabird 素材和文章，请先运行该程序的 --help，使用 content 命令。读取完整内容后再修改，更新时提供读取到的原始对象作为 expected，保留未要求修改的字段。保存后报告内容 ID；若有备份警告请告知用户。`; await invoke('start_interactive', { root, id: current.agent, prompt: task + (taskContext.current ? `\n\n${taskContext.current()}` : '') + context, runId, sessionId: current.sessionId || null }); setPrompt(''); setTaskSuggestion(''); taskContext.current = null; }
-    catch (e) { if (activeRun.current === runId) { activeRun.current = ''; setAgentRunning(false); } updateConversation(current.id, c => ({ ...c, output: c.output + `\n启动失败：${errorText(e)}\n` })); fail(e); }
+    try { const context = `\n\nSeabird 可执行文件：${JSON.stringify(executablePath)}；工作目录：${JSON.stringify(root)}。如需读取或保存 Seabird 素材和文章，请先运行该程序的 --help，使用 content 命令。读取完整内容后再修改，更新时提供读取到的原始对象作为 expected，保留未要求修改的字段。保存后报告内容 ID；若有备份警告请告知用户。`; await invoke('start_interactive', { root, id: current.agent, prompt: task + (attachedContext ? `\n\n${attachedContext}` : '') + context, runId, sessionId: current.sessionId || null }); }
+    catch (e) { if (activeRun.current === runId) { activeRun.current = ''; setAgentRunning(false); } updateConversation(current.id, c => ({ ...c, messages: appendMessage(c.messages || [], 'system', `启动失败：${errorText(e)}`) })); fail(e); }
+  };
+  const deleteHistory = async (id?: string) => {
+    if (agentRunning || deletingConversations.current) return;
+    const target = id ? conversationsRef.current.find(c => c.id === id) : undefined;
+    if (id && !target) return;
+    if (!window.confirm(id ? `删除“${target!.title}”？` : '删除所有会话记录？')) return;
+    if ((!id || id === conversationIdRef.current) && prompt.trim() && !window.confirm('输入框有未发送的内容，删除后将清空。继续吗？')) return;
+    deletingConversations.current = true; setDeletingHistory(true);
+    try {
+      if (saving.current) await saving.current;
+      await invoke('delete_conversations', { root, id: id || null });
+      conversationsRef.current = id ? conversationsRef.current.filter(c => c.id !== id) : [];
+      setConversations(conversationsRef.current);
+      if (!id || id === conversationIdRef.current) { setCurrentId(''); setPrompt(''); setTaskSuggestion(''); taskContext.current = null; setRequests([]); }
+      if (!id && historyRef.current) historyRef.current.open = false;
+    } catch (error) { fail(error); }
+    finally { deletingConversations.current = false; setDeletingHistory(false); }
   };
   const respondToAgent = async (action: 'allow' | 'deny') => {
     if (!request || responding) return;
@@ -306,17 +349,24 @@ function App() {
     <main className="main"><header className="topbar" data-tauri-drag-region><div className="breadcrumbs"><span>内容工作台</span><ChevronRight size={14}/><strong>{({ home: '工作台', materials: '素材', articles: '文章', discover: '热点发现', files: '文件', database: '数据库', settings: '设置与文件' } as const)[view]}</strong></div><div className="top-actions"><button className="agent-toggle" aria-expanded={agentPanelOpen} aria-controls="agent-dock" onClick={() => setAgentPanelOpen(open => !open)}><Bot size={15}/>{agentRunning ? 'Agent 正在工作' : 'Agent 对话'}{request && <span className="agent-attention">需要回复</span>}</button><span className="local-badge"><span/> 本地运行</span><button className="icon-button" title="刷新工具状态" onClick={detect}><RefreshCw size={16}/></button></div></header>
       {notice && <div className="notice" role="status">{notice}<button onClick={() => setNotice('')} aria-label="关闭提示"><X size={15}/></button></div>}
       <div className="work-area"><div className="work-view">
-      <ContentWorkspace view={view} root={root} desktop={desktop} agentRunning={agentRunning} agentSetupNeeded={desktop && agentsDetected && !(agentChecked && agents.some(a => a.path)) && !setupReport?.agents.some(a => a.path && a.auth === 'configured' && agents.some(found => found.id === a.id && found.path))} onAgentSettings={() => setView('settings')} onNavigate={setView} onDirty={setContentDirty} onBusy={setContentBusy} onAgent={(task, context) => { if (agentRunning) { setNotice('Agent 正在执行任务，请结束后再发送新任务。'); return; } if (prompt.trim() && !window.confirm('Agent 输入框已有未发送的内容，确定替换吗？')) return; setPrompt(''); setTaskSuggestion(task.replace(/\n\n我的要求：$/, '').trim()); taskContext.current = context || null; setCurrentId(''); setAgentPanelOpen(true); }}/>
+      <ContentWorkspace view={view} root={root} desktop={desktop} agentRunning={agentRunning} agentSetupNeeded={desktop && agentsDetected && !(agentChecked && agents.some(a => a.path)) && !setupReport?.agents.some(a => a.path && a.auth === 'configured' && agents.some(found => found.id === a.id && found.path))} onAgentSettings={() => setView('settings')} onNavigate={setView} onDirty={setContentDirty} onBusy={setContentBusy} onAgent={(task, context) => { if (agentRunning) { setNotice('Agent 正在执行任务，请结束后再发送新任务。'); return; } if (prompt.trim() && !window.confirm('Agent 输入框已有未发送的内容，确定替换吗？')) return; setPrompt(''); setTaskSuggestion(task.replace(/\n\n我的要求：$/, '').trim()); taskContext.current = context || null; setAgentPanelOpen(true); }}/>
       {view === 'settings' && <div className="page tool-page"><div className="tool-heading"><div><span className="section-kicker">SETTINGS</span><h1>设置与文件</h1><p>管理本地内容位置与高级工具。</p></div></div><section className="settings-agents" id="agent-settings"><div className="section-head"><div><span className="section-kicker">LOCAL AGENTS</span><h2>本地 Agent</h2><p>检查安装与登录状态。应用内对话不需要配置 MCP。</p></div><button className="secondary-button" disabled={!desktop || !root || checkingAgents || connecting} onClick={inspectAgents}><RefreshCw size={14}/>{checkingAgents ? '检查中…' : '检查状态与连接'}</button></div>{!setupReport && <div className="agent-status-empty">{agentsDetected ? (agents.some(a => a.path) ? '已检测到本机 Agent，点击检查查看登录和连接状态。' : '尚未检测到 Codex 或 Claude Code，请先安装并登录。') : '正在检测本机 Agent…'}</div>}        {setupReport && <div className="setup-results"><div className="panel-title"><span>最近检查结果</span><small>工作目录：{setupReport.workspace}</small></div>{setupReport.agents.map(agent => <div className="setup-result" key={agent.id}><span><b>{agentInfo[agent.id]?.name || agent.id}</b><small>{agent.version || '未检测到'}{agent.path ? ` · ${agent.path}` : ''}</small></span><div><strong className={agent.bridge === 'connected' ? 'setup-success' : 'setup-warning'}>{agent.bridge === 'connected' ? 'MCP 已配置' : agent.bridge === 'not_installed' ? '未安装' : agent.bridge === 'conflict' ? 'MCP 配置冲突' : agent.bridge === 'not_connected' ? 'MCP 未配置' : 'MCP 状态待检查'}</strong><small>{agent.auth === 'configured' ? '登录已配置，实际请求时验证' : agent.auth === 'not_logged_in' ? '未登录' : '登录状态未知'} · {agent.detail}</small></div></div>)}</div>}
 <details className="agent-advanced"><summary>外部 Agent 连接（MCP）</summary>        <div className="bridge-section"><div className="section-head"><div><span className="section-kicker">CONNECT TO SEABIRD</span><h2>让外部 Agent 使用 Seabird</h2></div><button className="primary-button" disabled={!setupCommand || !root} onClick={copyAgentTask}>复制配置任务</button></div><p>将配置任务粘贴给本机 Codex 或 Claude Code，让它检查并配置自己的连接。MCP 允许它读取、创建和覆盖当前工作目录中的文本文件。</p><p>也可以直接连接全部已安装的 Agent：</p><div className="setup-command-row">{setupCommand && <pre className="setup-command" tabIndex={0}>{setupCommand}</pre>}<button className="secondary-button" disabled={!setupCommand} onClick={copySetupCommand}>复制命令</button><button className="secondary-button" disabled={!desktop || !root || connecting || agentRunning} onClick={connectAgents}>{connecting ? '正在连接…' : '一键连接'}</button></div><div className="bridge-list">{Object.entries(agentInfo).map(([id, info]) => <div key={id}><span><b>{info.name}</b><small>{agents.find(a => a.id === id)?.path ? '已安装' : '未检测到'}</small></span><div className="bridge-buttons"><button className="text-button" disabled={!desktop || !!registering || connecting || !agents.find(a => a.id === id)?.path} onClick={() => unregisterBridge(id)}>{registering === id ? '处理中…' : '移除 MCP 连接'}</button></div></div>)}</div><small className="bridge-help">连接绑定当前目录；切换目录后，需要先移除 Agent 中原有的 seabird 连接，再重新注册。配置后请在新会话中验证。</small></div></details></section><div className="workspace-card"><div className="folder-art"><FolderOpen size={24}/></div><div className="workspace-card-copy"><div className="card-title">本地素材目录</div><p>{root || '尚未选择目录'}</p></div><button className="secondary-button" onClick={chooseFolder}>切换目录</button></div><p className="settings-note">图片和视频保存在此目录。切换目录会显示该目录对应的素材和文章；数据库与连接配置保存在系统应用数据目录。</p><div className="settings-storage"><b>数据库与配置备份</b><span>{backupPath || '桌面应用中显示备份位置'}</span><small>素材与文章保存后会更新本地数据库备份；连接配置也会保留备份。备份不包含图片和视频文件，请另行备份素材目录。</small></div><div className="quick-grid settings-tools"><button onClick={() => setView('files')}><span className="quick-icon blue"><FileText size={18}/></span><span><b>浏览本地文件</b><small>查看当前目录的文件</small></span><ArrowUpRight size={16}/></button><button onClick={() => setView('database')}><span className="quick-icon purple"><Database size={18}/></span><span><b>数据库工具</b><small>查看本地数据与数据库位置</small></span><ArrowUpRight size={16}/></button></div></div>}
       {view === 'files' && <div className="page tool-page"><div className="tool-heading"><div><span className="section-kicker">YOUR FILES</span><h1>文件</h1><p>浏览和编辑工作目录中的文本文件。</p></div><button className="secondary-button" onClick={chooseFolder}><FolderOpen size={16}/> {root ? '切换目录' : '选择文件夹'}</button></div>{file ? <div className="editor-panel"><div className="editor-header"><div><FileCode2 size={16}/><b>{basename(file)}</b>{dirty && <span className="unsaved">未保存</span>}</div><button className="primary-button" onClick={save} disabled={!dirty}><Save size={15}/> 保存</button></div><div className="file-path">{file}</div><textarea className="editor" aria-label="文件内容" spellCheck={false} value={content} onChange={e => setContent(e.target.value)}/><div className="editor-footer">纯文本编辑器 <span>{content.split('\n').length} 行 · ⌘ / Ctrl + S 保存</span></div></div> : <div className="empty-state"><div className="empty-icon"><FileText size={25}/></div><h3>选择一个文件</h3><p>{root ? '从左侧文件浏览器打开文本文件。' : '先选择一个工作目录，然后从左侧打开文件。'}</p>{!root && <button className="primary-button" onClick={chooseFolder}>选择工作目录</button>}</div>}</div>}
       {view === 'database' && <div className="page tool-page"><div className="tool-heading"><div><span className="section-kicker">LOCAL DATABASE</span><h1>数据库</h1><p>用 SQL 查询和管理你的本地数据。</p></div><span className="database-badge"><span className="status-dot"/> SQLite 3</span></div><div className="db-location"><HardDrive size={16}/><span><b>应用数据库</b><small>{dbPath || '在桌面应用中可用'}</small></span></div><div className="sql-panel"><div className="panel-title"><span><Braces size={16}/> SQL 查询</span><small>每次执行一条语句</small></div><textarea spellCheck={false} aria-label="SQL 查询" value={sql} onChange={e => setSql(e.target.value)}/><div className="sql-actions"><span>内置 notes 表，可自由创建其他表。</span><button className="primary-button" onClick={executeSql} disabled={!desktop || busy || !sql.trim()}><Play size={14} fill="currentColor"/> 执行查询</button></div></div><div className="result-panel"><div className="panel-title"><span><Database size={16}/> 查询结果</span><small>{result?.message || '等待执行'}</small></div>{result?.columns.length ? <div className="table-wrap"><table><thead><tr>{result.columns.map((col, i) => <th key={i}>{col}</th>)}</tr></thead><tbody>{result.rows.map((row, i) => <tr key={i}>{row.map((cell, j) => <td key={j}>{cell}</td>)}</tr>)}</tbody></table>{result.rows.length === 0 && <div className="result-empty">没有匹配的数据</div>}</div> : <div className="result-empty">{result ? result.message : '执行查询后，结果将显示在这里。'}</div>}</div></div>}
       </div>
-      {agentPanelOpen && <aside id="agent-dock" className="agent-dock" aria-label="Agent 对话"><div className="agent-dock-header"><div><h2><Bot size={18}/> Agent 对话</h2>{agentRunning && <p>正在处理任务</p>}</div><button className="icon-button" aria-label="收起 Agent 对话" onClick={() => setAgentPanelOpen(false)}><X size={17}/></button></div><div className="agent-dock-body">        {conversations.length > 0 && <details className="history-panel"><summary>历史对话 · {conversations.length}</summary><div><div className="history-list">{conversations.map(c => <button key={c.id} disabled={agentRunning} className={conversationId === c.id ? 'history-item selected' : 'history-item'} onClick={() => { if (prompt.trim() && !window.confirm('输入框已有未发送的内容，确定切换对话吗？')) return; setPrompt(''); setTaskSuggestion(''); taskContext.current = null; setCurrentId(c.id); setSelectedAgent(c.agent); setRequests([]); }}><b>{c.title}</b><small>{agentInfo[c.agent]?.name || c.agent}{c.sessionId ? '' : ' · 尚未建立会话'}</small></button>)}</div></div></details>}
-        {agentOutput && <div className="result-panel agent-result"><div className="panel-title"><span>对话</span><small>{agentRunning ? '正在执行' : '已完成'}</small></div><pre className="agent-output">{agentOutput}</pre></div>}
-        <div className="task-panel"><div className="panel-title"><span><Bot size={16}/> {sessionId ? '继续对话' : '新对话'}</span><span className="agent-select">{(conversationId || taskContext.current) && <button className="text-button" disabled={agentRunning} onClick={() => { if (prompt.trim() && !window.confirm('输入框已有未发送的内容，确定新建对话吗？')) return; setPrompt(''); setTaskSuggestion(''); taskContext.current = null; setCurrentId(''); setRequests([]); }}>新建对话</button>}<label htmlFor="agent-select">Agent</label><select id="agent-select" value={selectedAgent} disabled={agentRunning} onChange={e => chooseAgent(e.target.value)}>{Object.entries(agentInfo).map(([id, info]) => <option key={id} value={id}>{info.name}{agents.find(a => a.id === id)?.path ? '' : '（未检测到）'}</option>)}</select></span></div>
-          <textarea ref={promptRef} aria-label="任务内容" value={prompt} onChange={e => setPrompt(e.target.value)} placeholder="输入你想做的事…" disabled={agentRunning}/>{(taskContext.current || (!agentRunning && taskSuggestion && !prompt.trim()) || prompt) && <div className="task-tools">{taskContext.current && <span>已关联当前内容</span>}{!agentRunning && taskSuggestion && !prompt.trim() && <button type="button" className="task-suggestion" onClick={() => { setPrompt(taskSuggestion); promptRef.current?.focus(); }}>{taskSuggestion}</button>}{!agentRunning && prompt && <button type="button" className="text-button task-clear" onClick={() => { setPrompt(''); promptRef.current?.focus(); }}>清空输入</button>}</div>}<div className="task-actions"><span>{agents.find(a => a.id === selectedAgent)?.path ? '使用本机已有的登录和权限配置' : '请先安装并登录所选 Agent'} {!agents.find(a => a.id === selectedAgent)?.path && <button className="text-button" onClick={() => setView('settings')}>前往设置</button>}</span>{agentRunning ? <button className="secondary-button" disabled={stoppingAgent} onClick={stopAgent}>{stoppingAgent ? '正在停止…' : '停止任务'}</button> : <button className="primary-button" disabled={!desktop || !root || !agentEventsReady || historyLoading || !prompt.trim() || !agents.find(a => a.id === selectedAgent)?.path} onClick={runAgent}><Send size={14}/>{sessionId ? '发送' : '开始任务'}</button>}</div></div>
+      {agentPanelOpen && <aside id="agent-dock" className="agent-dock" aria-label="Agent 对话"><div className="agent-dock-header"><h2><Bot size={18}/> Agent 对话</h2><div className="agent-header-actions"><button className="text-button" disabled={agentRunning || deletingHistory} onClick={() => { if (prompt.trim() && !window.confirm('输入框已有未发送的内容，确定新建对话吗？')) return; setPrompt(''); setTaskSuggestion(''); taskContext.current = null; setCurrentId(''); setRequests([]); followTranscript.current = true; if (historyRef.current) historyRef.current.open = false; promptRef.current?.focus(); }}><Plus size={14}/>新建会话</button><details className="history-menu" ref={historyRef}><summary><History size={14}/>历史会话</summary><div className="history-popover"><div className="history-menu-head"><b>历史会话</b>{conversations.length > 0 && <button className="text-button" disabled={agentRunning || deletingHistory} onClick={() => void deleteHistory()}>清空</button>}</div><div className="history-menu-list">{conversations.length ? conversations.map(c => <div className={conversationId === c.id ? 'history-row selected' : 'history-row'} key={c.id}><button className="history-open" disabled={agentRunning || deletingHistory} onClick={() => { if (prompt.trim() && !window.confirm('输入框已有未发送的内容，确定切换对话吗？')) return; setPrompt(''); setTaskSuggestion(''); taskContext.current = null; setCurrentId(c.id); setSelectedAgent(c.agent); setRequests([]); if (historyRef.current) historyRef.current.open = false; }}><b>{c.title}</b><small>{agentInfo[c.agent]?.name || c.agent}</small></button><button className="history-delete" disabled={agentRunning || deletingHistory} aria-label={`删除会话 ${c.title}`} title="删除" onClick={() => void deleteHistory(c.id)}><Trash2 size={14}/></button></div>) : <div className="history-empty">暂无会话</div>}</div></div></details><button className="icon-button" aria-label="收起 Agent 对话" onClick={() => setAgentPanelOpen(false)}><X size={17}/></button></div></div>
+        <div className="agent-transcript" ref={transcriptRef} onScroll={e => { const el = e.currentTarget; followTranscript.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80; }} aria-label="对话记录">
+          {!agentOutput && messages.length === 0 && <div className="chat-empty"><Bot size={22}/><strong>开始对话</strong></div>}
+          {agentOutput && <div className="chat-message chat-legacy"><pre>{agentOutput}</pre></div>}
+          {messages.map((message, index) => message.role === 'activity' ? <details className="chat-activity" key={index}><summary>执行过程</summary><pre>{message.text}</pre></details> : <div className={`chat-message chat-${message.role}`} key={index}><div className="chat-label">{message.role === 'user' ? '你' : message.role === 'assistant' ? (agentInfo[currentConversation?.agent || '']?.name || 'Agent') : '状态'}</div><pre>{message.text}</pre></div>)}
+          {agentRunning && <div className="chat-working" role="status"><span/> 正在处理…</div>}
+        </div>
+        <div className="agent-composer">
         {request && <div className="request-panel" role="region" aria-label="Agent 请求" ref={requestPanelRef} tabIndex={-1}><div className="panel-title"><span>{!supportedRequest ? '暂不支持此类请求' : requestQuestions(request).length ? 'Agent 需要你的回答' : 'Agent 请求操作权限'}</span><small>{request.method}</small></div>{requestQuestions(request).length ? requestQuestions(request).map(q => <div className="request-question" key={q.id}><label htmlFor={`answer-${q.id}`}>{q.label}{q.multiple ? '（多项可用逗号分隔）' : ''}</label>{q.options.length > 0 && <div className="answer-options">{q.options.map(option => <button key={option} type="button" className="secondary-button" onClick={() => setAnswers(previous => ({ ...previous, [q.id]: q.multiple && previous[q.id] ? `${previous[q.id]}, ${option}` : option }))}>{option}</button>)}</div>}<input id={`answer-${q.id}`} type={q.secret ? "password" : "text"} value={answers[q.id] || ''} onChange={event => setAnswers(previous => ({ ...previous, [q.id]: event.target.value }))} placeholder="输入或选择回答" /></div>) : <pre>{JSON.stringify(request.params, null, 2)}</pre>}<div className="request-actions"><button className="secondary-button" disabled={responding || !supportedRequest || (Array.isArray(request.params.availableDecisions) && !request.params.availableDecisions.includes('decline') && !request.params.availableDecisions.includes('cancel'))} onClick={() => respondToAgent('deny')}>拒绝</button><button className="primary-button" disabled={responding || !supportedRequest || (Array.isArray(request.params.availableDecisions) && !request.params.availableDecisions.includes('accept'))} onClick={() => respondToAgent('allow')}>{requestQuestions(request).length ? '提交回答' : '允许'}</button></div></div>}
+        <div className="task-panel">
+          <textarea ref={promptRef} aria-label="消息内容" value={prompt} onChange={e => setPrompt(e.target.value)} onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing && !agentRunning && desktop && root && agentEventsReady && !historyLoading && agents.find(a => a.id === selectedAgent)?.path) { e.preventDefault(); void runAgent(); } }} placeholder={agentRunning ? '输入下一条消息…' : '输入消息…'}/>{(taskContext.current || (!agentRunning && taskSuggestion && !prompt.trim())) && <div className="task-tools">{taskContext.current && <span>已关联当前内容</span>}{!agentRunning && taskSuggestion && !prompt.trim() && <button type="button" className="task-suggestion" onClick={() => { setPrompt(taskSuggestion); promptRef.current?.focus(); }}>{taskSuggestion}</button>}</div>}<div className="task-actions"><div className="agent-select"><label htmlFor="agent-select" className="sr-only">选择 Agent</label><select id="agent-select" aria-label="选择 Agent" value={selectedAgent} disabled={agentRunning || deletingHistory} onChange={e => chooseAgent(e.target.value)}>{Object.entries(agentInfo).map(([id, info]) => <option key={id} value={id}>{info.name}{agents.find(a => a.id === id)?.path ? '' : '（未检测到）'}</option>)}</select></div>{!agents.find(a => a.id === selectedAgent)?.path && <button className="text-button agent-setup-link" onClick={() => setView('settings')}>前往设置</button>}{agentRunning ? <button className="secondary-button" disabled={stoppingAgent} onClick={stopAgent}><Square size={12} fill="currentColor"/>{stoppingAgent ? '停止中' : '停止'}</button> : <button className="primary-button" disabled={!desktop || !root || !agentEventsReady || historyLoading || deletingHistory || !prompt.trim() || !agents.find(a => a.id === selectedAgent)?.path} onClick={runAgent}><Send size={14}/><span>发送</span></button>}</div></div>
+
 </div></aside>}
       </div>
       <div className="bottom-bar"><span><span className="status-dot"/> {desktop ? '本地模式' : '浏览器预览'}</span><span>{root ? basename(root) : '未选择工作目录'} <span className="bottom-separator">/</span> Seabird</span></div>

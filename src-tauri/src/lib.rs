@@ -715,6 +715,31 @@ fn save_conversation(
     }
     Ok(())
 }
+#[tauri::command]
+fn delete_conversations(
+    app: tauri::AppHandle,
+    root: String,
+    id: Option<String>,
+) -> Result<(), String> {
+    let conn = database(&app)?;
+    remove_conversations(&conn, &root, id.as_deref())?;
+    if let Err(error) = backup_database(&app, &conn, true, false) {
+        eprintln!("本地数据库备份失败：{error}");
+    }
+    Ok(())
+}
+fn remove_conversations(conn: &Connection, root: &str, id: Option<&str>) -> Result<(), String> {
+    ensure_conversations(conn)?;
+    match id {
+        Some(id) => conn.execute(
+            "DELETE FROM agent_conversations WHERE root = ?1 AND id = ?2",
+            rusqlite::params![root, id],
+        ),
+        None => conn.execute("DELETE FROM agent_conversations WHERE root = ?1", [root]),
+    }
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
 fn ensure_conversations(conn: &Connection) -> Result<(), String> {
     conn.execute_batch("CREATE TABLE IF NOT EXISTS agent_conversations (id TEXT PRIMARY KEY, root TEXT NOT NULL, data TEXT NOT NULL, updated_at INTEGER NOT NULL)").map_err(|e| e.to_string())
 }
@@ -728,7 +753,7 @@ fn write_conversation(
         .filter(|id| !id.is_empty() && id.len() <= 128)
         .ok_or("会话标识无效")?;
     let data = serde_json::to_string(&conversation).map_err(|e| e.to_string())?;
-    if data.len() > 2_000_000 {
+    if data.len() > 8_000_000 {
         return Err("对话记录过长".into());
     }
     ensure_conversations(conn)?;
@@ -739,6 +764,41 @@ fn write_conversation(
 mod conversation_tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn removes_selected_or_all_conversations_only_in_current_workspace() {
+        let conn = Connection::open_in_memory().unwrap();
+        for (root, id) in [("/one", "a"), ("/one", "b"), ("/two", "c")] {
+            write_conversation(&conn, root, &json!({"id": id})).unwrap();
+        }
+        remove_conversations(&conn, "/two", Some("a")).unwrap();
+        assert_eq!(read_conversations(&conn, "/one").unwrap().len(), 2);
+        remove_conversations(&conn, "/one", Some("a")).unwrap();
+        assert_eq!(
+            read_conversations(&conn, "/one").unwrap(),
+            vec![json!({"id": "b"})]
+        );
+        remove_conversations(&conn, "/one", None).unwrap();
+        assert!(read_conversations(&conn, "/one").unwrap().is_empty());
+        assert_eq!(
+            read_conversations(&conn, "/two").unwrap(),
+            vec![json!({"id": "c"})]
+        );
+    }
+    #[test]
+    fn saves_long_conversation_with_legacy_history() {
+        let conn = Connection::open_in_memory().unwrap();
+        let conversation = json!({
+            "id": "long-session",
+            "sessionId": "native-1",
+            "output": "旧".repeat(400_000),
+            "messages": [{"role": "assistant", "text": "新".repeat(400_000)}]
+        });
+        write_conversation(&conn, "/one", &conversation).unwrap();
+        assert_eq!(
+            read_conversations(&conn, "/one").unwrap(),
+            vec![conversation]
+        );
+    }
     #[test]
     fn saves_latest_session_and_isolates_workspaces() {
         let conn = Connection::open_in_memory().unwrap();
@@ -781,6 +841,7 @@ pub fn run() {
             interactive::stop_interactive,
             list_conversations,
             save_conversation,
+            delete_conversations,
             stop_agent,
             bridge_config,
             register_bridge,
@@ -790,6 +851,7 @@ pub fn run() {
             database_path,
             backup_path,
             content::content_load,
+            content::content_open_url,
             content::content_save_material,
             content::content_save_article,
             content::content_delete,

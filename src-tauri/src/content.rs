@@ -33,6 +33,8 @@ pub struct Article {
     pub id: i64,
     pub title: String,
     pub body: String,
+    #[serde(default)]
+    pub tags: String,
     pub versions: BTreeMap<String, Version>,
     pub material_ids: Vec<i64>,
     pub updated_at: String,
@@ -53,10 +55,36 @@ fn init(conn: &Connection) -> Result<(), String> {
         CREATE TABLE IF NOT EXISTS content_materials (id INTEGER PRIMARY KEY, root TEXT NOT NULL, title TEXT NOT NULL, source TEXT NOT NULL DEFAULT '', url TEXT NOT NULL DEFAULT '', note TEXT NOT NULL DEFAULT '', tags TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
         CREATE INDEX IF NOT EXISTS content_materials_root ON content_materials(root);
         CREATE TABLE IF NOT EXISTS content_material_media (material_id INTEGER NOT NULL REFERENCES content_materials(id) ON DELETE CASCADE, path TEXT NOT NULL, name TEXT NOT NULL, kind TEXT NOT NULL, PRIMARY KEY(material_id,path));
-        CREATE TABLE IF NOT EXISTS content_articles (id INTEGER PRIMARY KEY, root TEXT NOT NULL, title TEXT NOT NULL, body TEXT NOT NULL DEFAULT '', versions TEXT NOT NULL DEFAULT '{}', updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+        CREATE TABLE IF NOT EXISTS content_articles (id INTEGER PRIMARY KEY, root TEXT NOT NULL, title TEXT NOT NULL, body TEXT NOT NULL DEFAULT '', versions TEXT NOT NULL DEFAULT '{}', tags TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
         CREATE INDEX IF NOT EXISTS content_articles_root ON content_articles(root);
         CREATE TABLE IF NOT EXISTS content_article_materials (article_id INTEGER NOT NULL REFERENCES content_articles(id) ON DELETE CASCADE, material_id INTEGER NOT NULL REFERENCES content_materials(id) ON DELETE CASCADE, PRIMARY KEY(article_id, material_id));")
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    let has_tags = || -> Result<bool, String> {
+        let mut stmt = conn
+            .prepare("PRAGMA table_info(content_articles)")
+            .map_err(|e| e.to_string())?;
+        let names = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(|e| e.to_string())?;
+        for name in names {
+            if name.map_err(|e| e.to_string())? == "tags" {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    };
+    if !has_tags()? {
+        if let Err(error) = conn.execute(
+            "ALTER TABLE content_articles ADD COLUMN tags TEXT NOT NULL DEFAULT ''",
+            [],
+        ) {
+            // Another connection may have completed the same migration concurrently.
+            if !has_tags()? {
+                return Err(format!("文章标签迁移失败：{error}"));
+            }
+        }
+    }
+    Ok(())
 }
 fn load(conn: &Connection, root: &str) -> Result<ContentData, String> {
     init(conn)?;
@@ -91,7 +119,7 @@ fn load(conn: &Connection, root: &str) -> Result<ContentData, String> {
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| e.to_string())?;
     }
-    let mut statement = conn.prepare("SELECT id,title,body,versions,updated_at FROM content_articles WHERE root=?1 ORDER BY updated_at DESC,id DESC").map_err(|e| e.to_string())?;
+    let mut statement = conn.prepare("SELECT id,title,body,versions,tags,updated_at FROM content_articles WHERE root=?1 ORDER BY updated_at DESC,id DESC").map_err(|e| e.to_string())?;
     let rows = statement
         .query_map([root], |r| {
             Ok((
@@ -100,12 +128,13 @@ fn load(conn: &Connection, root: &str) -> Result<ContentData, String> {
                 r.get::<_, String>(2)?,
                 r.get::<_, String>(3)?,
                 r.get::<_, String>(4)?,
+                r.get::<_, String>(5)?,
             ))
         })
         .map_err(|e| e.to_string())?;
     let mut articles = Vec::new();
     for row in rows {
-        let (id, title, body, versions, updated_at) = row.map_err(|e| e.to_string())?;
+        let (id, title, body, versions, tags, updated_at) = row.map_err(|e| e.to_string())?;
         let mut links = conn.prepare("SELECT material_id FROM content_article_materials WHERE article_id=?1 ORDER BY material_id").map_err(|e| e.to_string())?;
         let material_ids = links
             .query_map([id], |r| r.get(0))
@@ -116,6 +145,7 @@ fn load(conn: &Connection, root: &str) -> Result<ContentData, String> {
             id,
             title,
             body,
+            tags,
             versions: serde_json::from_str(&versions)
                 .map_err(|e| format!("文章平台版本读取失败：{e}"))?,
             material_ids,
@@ -210,7 +240,11 @@ fn save_article_checked(
         return Err("请输入文章标题".into());
     }
     let versions = serde_json::to_string(&item.versions).map_err(|e| e.to_string())?;
-    if item.title.len() > 2000 || item.body.len() > 2_000_000 || versions.len() > 4_000_000 {
+    if item.title.len() > 2000
+        || item.body.len() > 2_000_000
+        || versions.len() > 4_000_000
+        || item.tags.len() > 10000
+    {
         return Err("文章内容过长".into());
     }
     let tx = conn
@@ -225,13 +259,13 @@ fn save_article_checked(
     }
     let id = if item.id == 0 {
         tx.execute(
-            "INSERT INTO content_articles(root,title,body,versions) VALUES (?1,?2,?3,?4)",
-            params![root, item.title.trim(), item.body, versions],
+            "INSERT INTO content_articles(root,title,body,versions,tags) VALUES (?1,?2,?3,?4,?5)",
+            params![root, item.title.trim(), item.body, versions, item.tags],
         )
         .map_err(|e| e.to_string())?;
         tx.last_insert_rowid()
     } else {
-        let n=tx.execute("UPDATE content_articles SET title=?1,body=?2,versions=?3,updated_at=CURRENT_TIMESTAMP WHERE id=?4 AND root=?5",params![item.title.trim(),item.body,versions,item.id,root]).map_err(|e|e.to_string())?;
+        let n=tx.execute("UPDATE content_articles SET title=?1,body=?2,versions=?3,tags=?4,updated_at=CURRENT_TIMESTAMP WHERE id=?5 AND root=?6",params![item.title.trim(),item.body,versions,item.tags,item.id,root]).map_err(|e|e.to_string())?;
         if n == 0 {
             return Err("文章不存在或不属于当前工作目录".into());
         }
@@ -453,7 +487,8 @@ fn cli_content_at(
             save_material_checked(&mut conn, &root, &item, before.as_ref())?
         }
         "save-article" => {
-            let item: Article =
+            let has_tags = value.get("tags").is_some();
+            let mut item: Article =
                 serde_json::from_value(value).map_err(|e| format!("文章格式错误：{e}"))?;
             let before: Option<Article> = expected
                 .map(serde_json::from_value)
@@ -461,6 +496,11 @@ fn cli_content_at(
                 .map_err(|e| format!("原始文章格式错误：{e}"))?;
             if item.id != 0 && before.is_none() {
                 return Err("修改文章必须提供读取时的 expected 原始对象".into());
+            }
+            if !has_tags {
+                if let Some(before) = &before {
+                    item.tags.clone_from(&before.tags);
+                }
             }
             save_article_checked(&mut conn, &root, &item, before.as_ref())?
         }
@@ -559,6 +599,27 @@ pub async fn content_trends() -> Result<TrendResult, String> {
 mod tests {
     use super::*;
     #[test]
+    fn article_tags_migrate_old_database_and_detect_concurrent_changes() {
+        let mut db = Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE content_articles (id INTEGER PRIMARY KEY, root TEXT NOT NULL, title TEXT NOT NULL, body TEXT NOT NULL DEFAULT '', versions TEXT NOT NULL DEFAULT '{}', updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP); INSERT INTO content_articles(root,title,body,versions) VALUES('/workspace','旧文章','保留的正文','{\"x\":{\"title\":\"标题\",\"body\":\"平台正文\"}}');").unwrap();
+        let original = load(&db, "/workspace").unwrap().articles.remove(0);
+        assert_eq!(original.tags, "");
+        assert_eq!(original.body, "保留的正文");
+        assert_eq!(original.versions["x"].body, "平台正文");
+        let mut updated = original.clone();
+        updated.tags = "AI,内容，研究".into();
+        save_article_checked(&mut db, "/workspace", &updated, Some(&original)).unwrap();
+        assert_eq!(
+            load(&db, "/workspace").unwrap().articles[0].tags,
+            "AI,内容，研究"
+        );
+        let mut stale = original.clone();
+        stale.body = "旧正文".into();
+        assert!(save_article_checked(&mut db, "/workspace", &stale, Some(&original)).is_err());
+        init(&db).unwrap();
+        assert_eq!(load(&db, "/workspace").unwrap().articles.len(), 1);
+    }
+    #[test]
     fn agent_content_roundtrip_guards_concurrent_edits_and_preserves_links() {
         let base = std::env::temp_dir().join(format!(
             "seabird-agent-content-{}-{}",
@@ -581,7 +642,7 @@ mod tests {
         )
         .unwrap();
         let mid = saved["id"].as_i64().unwrap();
-        let article = serde_json::json!({"id":0,"title":"初稿","body":"正文","versions":{"wechat":{"title":"公众号","body":"原文"}},"material_ids":[mid],"updated_at":""});
+        let article = serde_json::json!({"id":0,"title":"初稿","body":"正文","tags":"AI,创作","versions":{"wechat":{"title":"公众号","body":"原文"}},"material_ids":[mid],"updated_at":""});
         let saved = cli_content_at(
             workspace,
             "save-article",
@@ -594,6 +655,8 @@ mod tests {
         let original = data["articles"][0].clone();
         assert_eq!(original["material_ids"], serde_json::json!([mid]));
         let mut updated = original.clone();
+        // Older agents can omit this newly introduced field while modifying text.
+        updated.as_object_mut().unwrap().remove("tags");
         updated["body"] = serde_json::json!("修改后");
         assert!(cli_content_at(
             workspace,
@@ -621,6 +684,7 @@ mod tests {
         let result = cli_content_at(workspace, "list", None, &app).unwrap();
         assert_eq!(result["articles"][0]["id"], id);
         assert_eq!(result["articles"][0]["body"], "修改后");
+        assert_eq!(result["articles"][0]["tags"], "AI,创作");
         assert_eq!(result["articles"][0]["versions"]["wechat"]["body"], "原文");
         assert_eq!(
             result["articles"][0]["material_ids"],
@@ -713,6 +777,7 @@ mod tests {
         let a = Article {
             id: 0,
             title: "文章".into(),
+            tags: String::new(),
             body: "原稿".into(),
             versions,
             material_ids: vec![mid],

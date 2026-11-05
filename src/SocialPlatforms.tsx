@@ -155,31 +155,13 @@ export default function SocialPlatforms({ desktop, mode, onLookup, onStopLookup,
       if (warning) setError(`平台已删除，但备份失败：${warning}`); else setFeedback('平台已删除。');
     } catch (e) { setError(`删除平台失败：${String(e)}`); } finally { setBusy(false); }
   };
-  const openSelected = async () => {
-    const items = platforms.filter(item => selected.includes(item.id) && item.enabled !== false && item.types.includes('article'));
-    setError(''); setFeedback('');
-    if (!desktop) {
-      const blocked = items.filter(item => !window.open(item.url, '_blank', 'noopener,noreferrer'));
-      // Browsers may return null for noopener even when a tab opens.
-      if (blocked.length) setFeedback('已请求打开所选平台；如果页面未打开，请允许弹出窗口。');
-      else setFeedback('已打开平台页面，请在各平台完成发布。');
-      return;
-    }
-    setBusy(true);
-    const failed: string[] = [];
-    for (const item of items) { try { await invoke('content_open_url', { url: item.url }); } catch { failed.push(item.name); } }
-    if (failed.length) setError(`无法打开：${failed.join('、')}。请检查链接或浏览器设置。`);
-    else setFeedback('已打开平台页面，请在各平台完成发布。');
-    setBusy(false);
-  };
   const articlePlatforms = platforms.filter(item => item.enabled !== false && item.types.includes('article'));
   const allArticleSelected = articlePlatforms.length > 0 && articlePlatforms.every(item => selected.includes(item.id));
   const allEnabled = platforms.length > 0 && platforms.every(item => item.enabled !== false);
   return <section className={`social-platforms${mode === 'settings' ? ' social-platforms-settings' : ''}`} aria-label="发布平台">
     {mode === 'article' ? <><div className="content-aside-title"><ExternalLink size={15}/><b>发布平台</b><button type="button" className="social-select-all" disabled={!articlePlatforms.length || busy} onClick={() => setSelected(allArticleSelected ? [] : articlePlatforms.map(item => item.id))}>{allArticleSelected ? '取消全选' : '全选'}</button><button type="button" className="social-manage" onClick={onSettings}><Settings2 size={13}/> 设置</button></div>
       {articlePlatforms.length ? <div className="social-options">{articlePlatforms.map(item => <label className="social-option" key={item.id} title={item.name}><input type="checkbox" aria-label={item.name} checked={selected.includes(item.id)} onChange={e => setSelected(current => e.target.checked ? [...current, item.id] : current.filter(id => id !== item.id))}/><Icon platform={item}/>{selected.includes(item.id) && <span className="social-check" aria-hidden="true"><Check size={9} strokeWidth={3}/></span>}</label>)}</div> : <p>没有启用适用于文章的平台，请前往设置选择。</p>}
-      <button type="button" className="content-primary social-publish" disabled={!selected.length || busy} onClick={() => void openSelected()}>前往发布{selected.length > 0 ? `（${selected.length}）` : ''}</button>
-      <p>打开平台后，请复制文章并在平台完成发布。</p>
+      <button type="button" className="content-primary social-publish" disabled>发布（暂不可用）</button>
     </> : <>
       <div className="section-head"><div><h2>发布平台</h2><p>勾选需要显示在发布页面的平台。</p></div><button type="button" className="social-select-all" disabled={!platforms.length || busy || lookingUp || !!form} onClick={() => void setEnabled(platforms, !allEnabled)}>{allEnabled ? '取消全选' : '全选'}</button></div>
       <div className="social-admin-list">{platforms.map(item => <div className="social-admin-row" key={item.id}><label title={`${item.name}（${kinds.filter(k => item.types.includes(k.value)).map(k => k.label).join('、')}）`}><input type="checkbox" aria-label={`显示 ${item.name}`} checked={item.enabled !== false} disabled={busy || lookingUp || !!form} onChange={e => void setEnabled([item], e.target.checked)}/><Icon platform={item}/><b>{item.name}</b></label><button type="button" aria-label={`编辑平台 ${item.name}`} title="编辑" disabled={busy || lookingUp} onClick={() => { setShowDetails(true); setForm({ ...item, types: [...item.types] }); setError(''); setFeedback(''); }}><Pencil size={13}/></button></div>)}</div>

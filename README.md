@@ -8,6 +8,8 @@ Seabird 是一个本地内容工作台，用来收集素材、写文章，并让
 
 Seabird 不提供模型，需要使用本机已安装并登录的 Agent。桌面应用基于 Tauri 2、React 和 SQLite。
 
+![在 Seabird 中使用 Agent 协助编辑文章](docs/images/article-agent.webp)
+
 ## 连接外部 Agent
 
 1. 安装并打开 Seabird，确认使用的本地素材目录。

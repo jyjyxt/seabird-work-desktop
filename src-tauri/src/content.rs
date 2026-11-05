@@ -1,7 +1,7 @@
 //! Local materials and articles. Content is isolated by the selected workspace.
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, time::Duration};
+use std::collections::BTreeMap;
 use tauri::Manager;
 
 fn source_url(input: &str) -> Result<tauri::Url, String> {
@@ -651,91 +651,6 @@ fn cli_content_at(
     };
     let warning = crate::backup::database(&conn, dir, false, false).err();
     Ok(serde_json::json!({"id":id,"backup_warning":warning}))
-}
-
-#[derive(Serialize)]
-pub struct Trend {
-    title: String,
-    source: String,
-    url: String,
-    note: String,
-}
-#[derive(Serialize)]
-pub struct TrendResult {
-    account: String,
-    items: Vec<Trend>,
-}
-#[tauri::command]
-pub async fn content_trends() -> Result<TrendResult, String> {
-    tauri::async_runtime::spawn_blocking(|| {
-        #[cfg(unix)]
-        let path = {
-            let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
-            let output = std::process::Command::new(shell)
-                .args(["-lc", "command -v cloudl"])
-                .output()
-                .map_err(|e| format!("无法查找 cloudl：{e}"))?;
-            String::from_utf8_lossy(&output.stdout)
-                .lines()
-                .find(|s| std::path::Path::new(s).is_file())
-                .unwrap_or("")
-                .to_owned()
-        };
-        #[cfg(windows)]
-        let path = "cloudl".to_string();
-        if path.is_empty() {
-            return Err("未找到 cloudl，请先安装并连接浏览器".into());
-        }
-        let who = crate::setup::run_command(
-            &path,
-            &["twitter", "whoami", "-f", "json"],
-            Duration::from_secs(30),
-        )
-        .map_err(|e| format!("无法检查 X 登录：{e}"))?;
-        if !who.status.success() {
-            return Err("无法检查 X 登录状态，请检查 cloudl 浏览器连接".into());
-        }
-        let identity: serde_json::Value =
-            serde_json::from_slice(&who.stdout).map_err(|_| "无法读取 X 登录状态")?;
-        let account = identity
-            .get("username")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-            .ok_or("请先登录 X")?
-            .to_string();
-        let output = crate::setup::run_command(
-            &path,
-            &["twitter", "trending", "--limit", "20", "-f", "json"],
-            Duration::from_secs(45),
-        )
-        .map_err(|e| format!("获取 X 热点失败：{e}"))?;
-        if !output.status.success() {
-            return Err(format!(
-                "获取 X 热点失败：{}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            ));
-        }
-        let rows: Vec<serde_json::Value> =
-            serde_json::from_slice(&output.stdout).map_err(|_| "无法读取 X 热点结果")?;
-        let items = rows
-            .into_iter()
-            .filter_map(|v| {
-                Some(Trend {
-                    title: v.get("topic")?.as_str()?.to_string(),
-                    source: "X 热点".into(),
-                    url: String::new(),
-                    note: v
-                        .get("category")
-                        .and_then(|x| x.as_str())
-                        .unwrap_or("")
-                        .to_string(),
-                })
-            })
-            .collect();
-        Ok(TrendResult { account, items })
-    })
-    .await
-    .map_err(|e| format!("热点读取失败：{e}"))?
 }
 
 #[cfg(test)]

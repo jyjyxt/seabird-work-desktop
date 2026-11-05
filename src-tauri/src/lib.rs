@@ -888,8 +888,7 @@ pub fn run() {
             content::content_save_material,
             content::content_save_article,
             content::content_delete,
-            content::content_import_media,
-            content::content_trends
+            content::content_import_media
         ])
         .run(tauri::generate_context!())
         .expect("error while running Seabird");

@@ -130,7 +130,7 @@ pub fn start_interactive(
     let setup = if id == "codex" {
         send(
             &run,
-            json!({"id":0,"method":"initialize","params":{"clientInfo":{"name":"seabird","version":"0.1.0"},"capabilities":{}}}),
+            json!({"id":0,"method":"initialize","params":{"clientInfo":{"name":"seabird","version":env!("CARGO_PKG_VERSION")},"capabilities":{}}}),
         )
     } else {
         send(&run, json!({"type":"control_request","request_id":"init","request":{"subtype":"initialize"}})).and_then(|_| send(&run, json!({"type":"user","session_id":"","message":{"role":"user","content":prompt}})))

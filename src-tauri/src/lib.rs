@@ -887,6 +887,9 @@ pub fn run() {
             content::content_open_url,
             content::content_save_material,
             content::content_save_article,
+            content::publication_list,
+            content::publication_save,
+            content::publication_delete,
             content::content_delete,
             content::content_import_media
         ])

@@ -94,6 +94,14 @@ pub struct SaveResult {
     backup_warning: Option<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Publication {
+    id: i64,
+    article_id: i64,
+    article_title: String,
+    published_at: i64,
+}
+
 fn init(conn: &Connection) -> Result<(), String> {
     conn.execute_batch("PRAGMA foreign_keys = ON;
         CREATE TABLE IF NOT EXISTS content_materials (id INTEGER PRIMARY KEY, root TEXT NOT NULL, title TEXT NOT NULL, source TEXT NOT NULL DEFAULT '', url TEXT NOT NULL DEFAULT '', note TEXT NOT NULL DEFAULT '', tags TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
@@ -102,6 +110,9 @@ fn init(conn: &Connection) -> Result<(), String> {
         CREATE TABLE IF NOT EXISTS content_articles (id INTEGER PRIMARY KEY, root TEXT NOT NULL, title TEXT NOT NULL, body TEXT NOT NULL DEFAULT '', versions TEXT NOT NULL DEFAULT '{}', tags TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
         CREATE INDEX IF NOT EXISTS content_articles_root ON content_articles(root);
         CREATE TABLE IF NOT EXISTS content_article_materials (article_id INTEGER NOT NULL REFERENCES content_articles(id) ON DELETE CASCADE, material_id INTEGER NOT NULL REFERENCES content_materials(id) ON DELETE CASCADE, PRIMARY KEY(article_id, material_id));
+        CREATE TABLE IF NOT EXISTS content_publications (id INTEGER PRIMARY KEY, root TEXT NOT NULL, article_id INTEGER NOT NULL REFERENCES content_articles(id) ON DELETE CASCADE, article_title TEXT NOT NULL, published_at INTEGER NOT NULL);
+        CREATE INDEX IF NOT EXISTS content_publications_root_time ON content_publications(root, published_at);
+        CREATE TRIGGER IF NOT EXISTS content_publication_article_title AFTER UPDATE OF title ON content_articles BEGIN UPDATE content_publications SET article_title=NEW.title WHERE article_id=NEW.id AND root=NEW.root; END;
         CREATE TABLE IF NOT EXISTS content_suggestion_saves (root TEXT NOT NULL, suggestion_key TEXT NOT NULL, kind TEXT NOT NULL, content_id INTEGER NOT NULL, PRIMARY KEY(root, suggestion_key));
         CREATE TRIGGER IF NOT EXISTS content_material_suggestion_delete AFTER DELETE ON content_materials BEGIN DELETE FROM content_suggestion_saves WHERE root=OLD.root AND kind='material' AND content_id=OLD.id; END;
         CREATE TRIGGER IF NOT EXISTS content_article_suggestion_delete AFTER DELETE ON content_articles BEGIN DELETE FROM content_suggestion_saves WHERE root=OLD.root AND kind='article' AND content_id=OLD.id; END;")
@@ -427,6 +438,125 @@ fn save_article_with_key(
     tx.commit().map_err(|e| e.to_string())?;
     Ok(id)
 }
+fn load_publications(conn: &Connection, root: &str) -> Result<Vec<Publication>, String> {
+    init(conn)?;
+    let mut statement = conn.prepare("SELECT id,article_id,article_title,published_at FROM content_publications WHERE root=?1 ORDER BY published_at,id").map_err(|e| e.to_string())?;
+    let rows = statement
+        .query_map([root], |row| {
+            Ok(Publication {
+                id: row.get(0)?,
+                article_id: row.get(1)?,
+                article_title: row.get(2)?,
+                published_at: row.get(3)?,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())
+}
+
+fn save_publication(
+    conn: &mut Connection,
+    root: &str,
+    item: &Publication,
+    expected: Option<&Publication>,
+) -> Result<i64, String> {
+    init(conn)?;
+    if item.id < 0 || !(0..=253_402_300_799_999).contains(&item.published_at) {
+        return Err("请选择有效的发布时间".into());
+    }
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| e.to_string())?;
+    let existing: Option<Publication> = if item.id == 0 {
+        None
+    } else {
+        tx.query_row("SELECT id,article_id,article_title,published_at FROM content_publications WHERE root=?1 AND id=?2", params![root, item.id], |row| Ok(Publication { id: row.get(0)?, article_id: row.get(1)?, article_title: row.get(2)?, published_at: row.get(3)? })).optional().map_err(|e| e.to_string())?
+    };
+    if item.id != 0 {
+        let saved = existing.as_ref().ok_or("发布记录不存在")?;
+        let original = expected.ok_or("请重新打开发布记录后再保存")?;
+        if saved.id != original.id
+            || saved.article_id != original.article_id
+            || saved.published_at != original.published_at
+        {
+            return Err("发布记录已被修改，请重新打开后再保存".into());
+        }
+    } else if expected.is_some() {
+        return Err("发布记录格式错误".into());
+    }
+    let title = tx
+        .query_row(
+            "SELECT title FROM content_articles WHERE root=?1 AND id=?2",
+            params![root, item.article_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?
+        .ok_or("文章不存在，请重新选择")?;
+    let id = if item.id == 0 {
+        tx.execute("INSERT INTO content_publications(root,article_id,article_title,published_at) VALUES(?1,?2,?3,?4)", params![root, item.article_id, title, item.published_at]).map_err(|e| e.to_string())?;
+        tx.last_insert_rowid()
+    } else {
+        tx.execute("UPDATE content_publications SET article_id=?1,article_title=?2,published_at=?3 WHERE root=?4 AND id=?5", params![item.article_id, title, item.published_at, root, item.id]).map_err(|e| e.to_string())?;
+        item.id
+    };
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(id)
+}
+
+#[tauri::command]
+pub fn publication_list(app: tauri::AppHandle, root: String) -> Result<Vec<Publication>, String> {
+    let root = crate::workspace::root(&root)?;
+    load_publications(&crate::database(&app)?, &root.to_string_lossy())
+}
+
+#[tauri::command]
+pub fn publication_save(
+    app: tauri::AppHandle,
+    root: String,
+    item: Publication,
+    expected: Option<Publication>,
+) -> Result<SaveResult, String> {
+    let root = crate::workspace::root(&root)?;
+    let mut conn = crate::database(&app)?;
+    let id = save_publication(&mut conn, &root.to_string_lossy(), &item, expected.as_ref())?;
+    Ok(SaveResult {
+        id,
+        backup_warning: crate::backup_database(&app, &conn, false, false).err(),
+    })
+}
+
+#[tauri::command]
+pub fn publication_delete(
+    app: tauri::AppHandle,
+    root: String,
+    id: i64,
+) -> Result<Option<String>, String> {
+    let root = crate::workspace::root(&root)?;
+    let conn = crate::database(&app)?;
+    init(&conn)?;
+    crate::backup_database(&app, &conn, false, true)
+        .map_err(|e| format!("无法创建删除前备份，未删除：{e}"))?;
+    delete_publication(&conn, &root.to_string_lossy(), id)?;
+    Ok(crate::backup_database(&app, &conn, false, false).err())
+}
+
+fn delete_publication(conn: &Connection, root: &str, id: i64) -> Result<(), String> {
+    init(conn)?;
+    if conn
+        .execute(
+            "DELETE FROM content_publications WHERE root=?1 AND id=?2",
+            params![root, id],
+        )
+        .map_err(|e| e.to_string())?
+        == 0
+    {
+        return Err("发布记录不存在".into());
+    }
+    Ok(())
+}
+
 fn delete(conn: &Connection, root: &str, kind: &str, id: i64) -> Result<(), String> {
     init(conn)?;
     let sql = match kind {
@@ -656,6 +786,56 @@ fn cli_content_at(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn publication_history_is_scoped_and_removed_with_article() {
+        let mut db = Connection::open_in_memory().unwrap();
+        let mut article = Article {
+            id: 0,
+            title: "第一篇".into(),
+            body: "正文".into(),
+            tags: String::new(),
+            versions: BTreeMap::new(),
+            material_ids: vec![],
+            updated_at: String::new(),
+        };
+        article.id = save_article(&mut db, "/one", &article).unwrap();
+        let mut item = Publication {
+            id: 0,
+            article_id: article.id,
+            article_title: String::new(),
+            published_at: 1_700_000_000_000,
+        };
+        assert!(save_publication(&mut db, "/two", &item, None).is_err());
+        item.id = save_publication(&mut db, "/one", &item, None).unwrap();
+        let saved = load_publications(&db, "/one").unwrap().pop().unwrap();
+        assert_eq!(saved.article_title, "第一篇");
+        assert!(load_publications(&db, "/two").unwrap().is_empty());
+        let changed = Publication {
+            published_at: saved.published_at + 60_000,
+            ..saved.clone()
+        };
+        save_publication(&mut db, "/one", &changed, Some(&saved)).unwrap();
+        assert!(save_publication(&mut db, "/one", &saved, Some(&saved)).is_err());
+        let another = Publication {
+            id: 0,
+            published_at: saved.published_at + 120_000,
+            ..saved.clone()
+        };
+        let second_id = save_publication(&mut db, "/one", &another, None).unwrap();
+        assert_eq!(load_publications(&db, "/one").unwrap().len(), 2);
+        assert!(delete_publication(&db, "/two", second_id).is_err());
+        delete_publication(&db, "/one", second_id).unwrap();
+        assert_eq!(load(&db, "/one").unwrap().articles.len(), 1);
+        save_publication(&mut db, "/one", &another, None).unwrap();
+        article.title = "更新后的标题".into();
+        save_article(&mut db, "/one", &article).unwrap();
+        assert_eq!(
+            load_publications(&db, "/one").unwrap()[0].article_title,
+            "更新后的标题"
+        );
+        delete(&db, "/one", "article", article.id).unwrap();
+        assert!(load_publications(&db, "/one").unwrap().is_empty());
+    }
     #[test]
     fn suggestion_saves_are_idempotent_and_workspace_scoped() {
         let mut db = Connection::open_in_memory().unwrap();

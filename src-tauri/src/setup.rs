@@ -61,7 +61,37 @@ fn read_settings_at(path: &Path) -> Result<Settings, String> {
 fn save_settings_at(path: &Path, settings: &Settings) -> Result<(), String> {
     fs::create_dir_all(path.parent().ok_or("无效配置目录")?).map_err(|e| e.to_string())?;
     let bytes = serde_json::to_vec_pretty(settings).map_err(|e| e.to_string())?;
-    fs::write(path, bytes).map_err(|e| format!("无法保存连接配置：{e}"))
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let temp = path.with_extension(format!(
+        "tmp-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    fs::write(&temp, bytes).map_err(|e| format!("无法保存连接配置：{e}"))?;
+    if let Err(e) = fs::rename(&temp, path) {
+        let _ = fs::remove_file(&temp);
+        return Err(format!("无法保存连接配置：{e}"));
+    }
+    Ok(())
+}
+
+// A separate SQLite lock coordinates all desktop and CLI read-modify-write operations.
+fn update_settings_at<F>(path: &Path, update: F) -> Result<(), String>
+where
+    F: FnOnce(&mut Settings) -> Result<(), String>,
+{
+    fs::create_dir_all(path.parent().ok_or("无效配置目录")?).map_err(|e| e.to_string())?;
+    let mut lock = rusqlite::Connection::open(path.with_extension("lock.sqlite3"))
+        .map_err(|e| e.to_string())?;
+    lock.busy_timeout(Duration::from_secs(10))
+        .map_err(|e| e.to_string())?;
+    let transaction = lock
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| e.to_string())?;
+    let mut settings = read_settings_at(path)?;
+    update(&mut settings)?;
+    save_settings_at(path, &settings)?;
+    transaction.commit().map_err(|e| e.to_string())
 }
 pub fn saved_report() -> Result<Option<SetupReport>, String> {
     let settings = read_settings_at(&config_file()?)?;
@@ -87,12 +117,13 @@ pub fn saved_agent(id: &str) -> Option<String> {
 
 pub fn mark_removed(id: &str) -> Result<(), String> {
     let path = config_file()?;
-    let mut settings = read_settings_at(&path)?;
-    if let Some(agent) = settings.agents.get_mut(id) {
-        agent.bridge = "not_connected".into();
-        agent.detail = "MCP 连接已移除".into();
-    }
-    save_settings_at(&path, &settings)
+    update_settings_at(&path, |settings| {
+        if let Some(agent) = settings.agents.get_mut(id) {
+            agent.bridge = "not_connected".into();
+            agent.detail = "MCP 连接已移除".into();
+        }
+        Ok(())
+    })
 }
 pub fn remember_workspace(root: &str) -> Result<(), String> {
     let root = fs::canonicalize(root).map_err(|e| format!("无法打开工作目录：{e}"))?;
@@ -100,16 +131,17 @@ pub fn remember_workspace(root: &str) -> Result<(), String> {
         return Err("请选择工作目录".into());
     }
     let path = config_file()?;
-    let mut settings = read_settings_at(&path)?;
     let root = root.to_string_lossy().into_owned();
-    if settings.workspace.as_deref() != Some(root.as_str()) {
-        for agent in settings.agents.values_mut() {
-            agent.bridge = "stale".into();
-            agent.detail = "工作目录已改变，请移除旧 MCP 连接后重新配置".into();
+    update_settings_at(&path, |settings| {
+        if settings.workspace.as_deref() != Some(root.as_str()) {
+            for agent in settings.agents.values_mut() {
+                agent.bridge = "stale".into();
+                agent.detail = "工作目录已改变，请移除旧 MCP 连接后重新配置".into();
+            }
         }
-    }
-    settings.workspace = Some(root);
-    save_settings_at(&path, &settings)
+        settings.workspace = Some(root);
+        Ok(())
+    })
 }
 fn workspace(explicit: Option<&str>, settings: &Settings) -> Result<PathBuf, String> {
     let path = match explicit.or(settings.workspace.as_deref()) {
@@ -173,7 +205,7 @@ fn run_command(executable: &str, args: &[&str], timeout: Duration) -> Result<Out
         stderr: err_thread.join().unwrap_or_default(),
     })
 }
-fn auth_status(id: &str, executable: &str) -> String {
+pub fn auth_status(id: &str, executable: &str) -> String {
     let args: &[&str] = if id == "codex" {
         &["login", "status"]
     } else {
@@ -208,7 +240,7 @@ fn auth_status(id: &str, executable: &str) -> String {
     }
 }
 
-fn verify_bridge(binary: &str, root: &str) -> Result<(), String> {
+pub fn verify_bridge(binary: &str, root: &str) -> Result<(), String> {
     let mut child = Command::new(binary)
         .args(["--mcp", root])
         .stdin(Stdio::piped())
@@ -249,7 +281,13 @@ fn verify_bridge(binary: &str, root: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn bridge_status(id: &str, agent: &str, binary: &str, root: &str) -> (String, String) {
+fn bridge_check(
+    id: &str,
+    agent: &str,
+    binary: &str,
+    root: &str,
+    install: bool,
+) -> (String, String) {
     let get: &[&str] = if id == "codex" {
         &["mcp", "get", "seabird", "--json"]
     } else {
@@ -297,6 +335,9 @@ fn bridge_status(id: &str, agent: &str, binary: &str, root: &str) -> (String, St
             "无法确认现有 MCP 配置，未修改；请检查 Agent 配置或权限".into(),
         );
     }
+    if !install {
+        return ("not_connected".into(), "尚未配置 Seabird MCP".into());
+    }
     let args: Vec<&str> = if id == "codex" {
         vec!["mcp", "add", "seabird", "--", binary, "--mcp", root]
     } else {
@@ -325,6 +366,35 @@ fn bridge_status(id: &str, agent: &str, binary: &str, root: &str) -> (String, St
         ),
         Err(error) => ("error".into(), format!("注册 MCP 失败：{error}")),
     }
+}
+fn bridge_status(id: &str, agent: &str, binary: &str, root: &str) -> (String, String) {
+    bridge_check(id, agent, binary, root, true)
+}
+
+pub fn check_bridge(
+    id: &str,
+    agent: &str,
+    binary: &str,
+    root: &str,
+    install: bool,
+) -> (String, String) {
+    bridge_check(id, agent, binary, root, install)
+}
+
+pub fn remove_bridge(id: &str, agent: &str) -> Result<(), String> {
+    let args: &[&str] = match id {
+        "codex" => &["mcp", "remove", "seabird"],
+        "claude" => &["mcp", "remove", "--scope", "user", "seabird"],
+        _ => return Err("不支持的 Agent".into()),
+    };
+    let output = run_command(agent, args, Duration::from_secs(12))?;
+    if !output.status.success() {
+        return Err(format!(
+            "移除 MCP 失败：{}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    mark_removed(id)
 }
 fn configure_agent(id: &str, agent: Option<String>, binary: &str, root: &str) -> AgentSetup {
     let Some(path) = agent else {
@@ -374,7 +444,8 @@ fn setup_with<F>(
 where
     F: Fn(&str) -> Option<String>,
 {
-    let mut settings = read_settings_at(path)?;
+    let settings = read_settings_at(path)?;
+    let original_workspace = settings.workspace.clone();
     let root = workspace(explicit_root, &settings)?
         .to_string_lossy()
         .into_owned();
@@ -382,11 +453,18 @@ where
     let mut agents = Vec::new();
     for id in ["codex", "claude"] {
         let result = configure_agent(id, discover(id), binary, &root);
-        settings.agents.insert(id.into(), result.clone());
         agents.push(result);
     }
-    settings.workspace = Some(root.clone());
-    save_settings_at(path, &settings)?;
+    update_settings_at(path, |settings| {
+        if settings.workspace != original_workspace {
+            return Err("配置期间工作目录已改变，请重新连接".into());
+        }
+        for result in &agents {
+            settings.agents.insert(result.id.clone(), result.clone());
+        }
+        settings.workspace = Some(root.clone());
+        Ok(())
+    })?;
     Ok(report(root, agents))
 }
 pub fn setup(explicit_root: Option<&str>) -> Result<SetupReport, String> {
@@ -459,7 +537,16 @@ mod tests {
         fs::write(&script, body).unwrap();
         fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
         let agent = script.to_str().unwrap();
+        assert_eq!(
+            bridge_check("codex", agent, binary, &root, false).0,
+            "not_connected"
+        );
+        assert!(!count.exists(), "status and preview must not register MCP");
         assert_eq!(bridge_status("codex", agent, binary, &root).0, "connected");
+        assert_eq!(
+            bridge_check("codex", agent, binary, &root, false).0,
+            "connected"
+        );
         assert_eq!(bridge_status("codex", agent, binary, &root).0, "connected");
         assert_eq!(fs::read_to_string(&count).unwrap().lines().count(), 1);
         fs::write(
@@ -469,6 +556,37 @@ mod tests {
         .unwrap();
         assert_eq!(bridge_status("codex", agent, binary, &root).0, "conflict");
         assert_eq!(fs::read_to_string(&count).unwrap().lines().count(), 1);
+        fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn concurrent_updates_preserve_both_changes() {
+        let dir = tempdir();
+        let config = dir.join("settings.json");
+        let mut threads = Vec::new();
+        for id in ["codex", "claude"] {
+            let path = config.clone();
+            threads.push(std::thread::spawn(move || {
+                update_settings_at(&path, |settings| {
+                    settings.agents.insert(
+                        id.into(),
+                        AgentSetup {
+                            id: id.into(),
+                            path: None,
+                            version: None,
+                            auth: "unknown".into(),
+                            bridge: "not_connected".into(),
+                            detail: String::new(),
+                        },
+                    );
+                    Ok(())
+                })
+                .unwrap();
+            }));
+        }
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        assert_eq!(read_settings_at(&config).unwrap().agents.len(), 2);
         fs::remove_dir_all(dir).unwrap();
     }
     #[cfg(unix)]

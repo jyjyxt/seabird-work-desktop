@@ -32,6 +32,8 @@ fn main() {
             eprintln!("Usage: seabird-workbench --mcp <workspace>");
             std::process::exit(2);
         }
+    } else if args.get(1).is_some_and(|arg| !arg.starts_with("-psn_")) {
+        std::process::exit(seabird_workbench_lib::run_cli(&args[1..]));
     } else {
         seabird_workbench_lib::run()
     }

@@ -3,7 +3,7 @@ use serde_json::{json, Value};
 use std::{
     collections::HashMap,
     io::{BufRead, BufReader, Write},
-    process::{Child, ChildStdin, Command, Stdio},
+    process::{Child, ChildStdin, Stdio},
     sync::{Arc, Mutex},
     thread,
 };
@@ -97,30 +97,7 @@ pub fn start_interactive(
             return Err("会话标识无效".into());
         }
     }
-    let executable = super::find_agent(&id).ok_or_else(|| format!("未找到 {id}，请先安装"))?;
-    let mut cmd = Command::new(executable);
-    match id.as_str() {
-        "codex" => {
-            cmd.args(["app-server", "--stdio"]);
-        }
-        "claude" => {
-            cmd.args([
-                "--print",
-                "--verbose",
-                "--input-format",
-                "stream-json",
-                "--output-format",
-                "stream-json",
-                "--include-partial-messages",
-                "--permission-prompt-tool",
-                "stdio",
-            ]);
-            if let Some(s) = &session_id {
-                cmd.args(["--resume", s]);
-            }
-        }
-        _ => return Err("不支持的 Agent".into()),
-    }
+    let mut cmd = super::agents::interactive_command(&id, session_id.as_deref())?;
     // Give each run its own process group so stopping a turn also stops its children.
     #[cfg(unix)]
     {

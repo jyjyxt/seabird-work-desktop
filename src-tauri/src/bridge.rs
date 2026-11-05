@@ -3,35 +3,11 @@ use serde_json::{json, Value};
 use std::{
     fs,
     io::{self, BufRead, Write},
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
 };
 
 fn resolved(root: &Path, relative: &str, allow_new: bool) -> Result<PathBuf, String> {
-    let path = Path::new(relative);
-    if path.is_absolute()
-        || path
-            .components()
-            .any(|c| !matches!(c, Component::Normal(_) | Component::CurDir))
-    {
-        return Err("路径必须位于工作目录内".into());
-    }
-    let joined = root.join(path);
-    let checked = if allow_new
-        && fs::symlink_metadata(&joined).is_err_and(|e| e.kind() == io::ErrorKind::NotFound)
-    {
-        let parent = joined
-            .parent()
-            .ok_or("路径没有父目录")?
-            .canonicalize()
-            .map_err(|e| e.to_string())?;
-        parent.join(joined.file_name().ok_or("路径缺少文件名")?)
-    } else {
-        joined.canonicalize().map_err(|e| e.to_string())?
-    };
-    if !checked.starts_with(root) {
-        return Err("路径不在工作目录内".into());
-    }
-    Ok(checked)
+    crate::workspace::resolve(root, relative, allow_new, true)
 }
 
 fn tools() -> Value {
@@ -70,21 +46,15 @@ fn call_tool(root: &Path, name: &str, args: &Value) -> Result<String, String> {
         }
         "read_file" => {
             let path = resolved(root, path()?, false)?;
-            if fs::metadata(&path).map_err(|e| e.to_string())?.len() > 2_000_000 {
-                return Err("文件超过 2 MB".into());
-            }
-            fs::read_to_string(path).map_err(|e| e.to_string())
+            crate::workspace::read(&path)
         }
         "write_file" => {
             let content = args
                 .get("content")
                 .and_then(Value::as_str)
                 .ok_or("缺少 content")?;
-            if content.len() > 2_000_000 {
-                return Err("文件超过 2 MB".into());
-            }
             let path = resolved(root, path()?, true)?;
-            fs::write(path, content).map_err(|e| e.to_string())?;
+            crate::workspace::write(&path, content)?;
             Ok("已保存".into())
         }
         _ => Err(format!("未知工具：{name}")),

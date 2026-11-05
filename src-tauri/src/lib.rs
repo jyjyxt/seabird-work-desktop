@@ -1,7 +1,10 @@
 mod agent_adapter;
+mod agents;
 mod bridge;
+mod cli;
 mod interactive;
 mod setup;
+mod workspace;
 
 pub fn run_setup(workspace: Option<&str>) -> Result<(String, bool), String> {
     let report = setup::setup(workspace)?;
@@ -11,6 +14,10 @@ pub fn run_setup(workspace: Option<&str>) -> Result<(String, bool), String> {
 
 pub fn run_bridge(workspace: &str) -> Result<(), String> {
     bridge::run(workspace)
+}
+
+pub fn run_cli(args: &[String]) -> i32 {
+    cli::run(args)
 }
 
 use rusqlite::{types::ValueRef, Connection};
@@ -91,12 +98,7 @@ fn default_workspace(app: tauri::AppHandle) -> Result<String, String> {
 }
 
 fn workspace_path(root: &str, path: &str) -> Result<PathBuf, String> {
-    let root = fs::canonicalize(root).map_err(|e| format!("无法打开工作目录：{e}"))?;
-    let path = fs::canonicalize(path).map_err(|e| format!("无法访问路径：{e}"))?;
-    if !root.is_dir() || !path.starts_with(&root) {
-        return Err("路径不在当前工作目录中".into());
-    }
-    Ok(path)
+    workspace::resolve(&workspace::root(root)?, path, false, false)
 }
 
 #[tauri::command]
@@ -129,64 +131,20 @@ fn list_files(root: String, path: String) -> Result<Vec<Entry>, String> {
 #[tauri::command]
 fn read_file(root: String, path: String) -> Result<String, String> {
     let path = workspace_path(&root, &path)?;
-    if fs::metadata(&path).map_err(|e| e.to_string())?.len() > 2_000_000 {
-        return Err("文件超过 2 MB，无法在编辑器中打开".into());
-    }
-    fs::read_to_string(path).map_err(|e| format!("无法读取文本文件：{e}"))
+    workspace::read(&path)
 }
 #[tauri::command]
 fn write_file(root: String, path: String, content: String) -> Result<(), String> {
     let path = workspace_path(&root, &path)?;
-    fs::write(path, content).map_err(|e| format!("保存失败：{e}"))
+    workspace::write(&path, &content)
 }
 fn find_agent(id: &str) -> Option<String> {
-    if !["codex", "claude"].contains(&id) {
-        return None;
-    }
-    #[cfg(windows)]
-    let output = Command::new("where").arg(id).output().ok();
-    #[cfg(not(windows))]
-    let output = Command::new(std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into()))
-        .args(["-lc", &format!("command -v {id}")])
-        .output()
-        .ok();
-    if let Some(output) = output.filter(|output| output.status.success()) {
-        if let Some(path) = String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .map(str::trim)
-            .find(|line| Path::new(line).is_file())
-        {
-            return Some(path.to_string());
-        }
-    }
-    let name = if cfg!(windows) {
-        format!("{id}.exe")
-    } else {
-        id.to_string()
-    };
-    let mut candidates = std::env::var_os("PATH")
-        .map(|value| std::env::split_paths(&value).collect::<Vec<_>>())
-        .unwrap_or_default();
-    if let Some(home) = dirs::home_dir() {
-        candidates.extend([home.join(".local/bin"), home.join(".cargo/bin")]);
-    }
-    #[cfg(not(windows))]
-    candidates.extend([
-        PathBuf::from("/opt/homebrew/bin"),
-        PathBuf::from("/usr/local/bin"),
-    ]);
-    for candidate in candidates {
-        let path = candidate.join(&name);
-        if path.is_file() {
-            return Some(path.to_string_lossy().into_owned());
-        }
-    }
-    setup::saved_agent(id)
+    agents::find_agent(id)
 }
 
 #[tauri::command]
 fn detect_agents() -> Vec<Agent> {
-    ["codex", "claude"]
+    agents::IDS
         .iter()
         .map(|id| Agent {
             id: id.to_string(),

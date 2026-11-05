@@ -97,6 +97,7 @@ function App() {
   const [setupCommand, setSetupCommand] = useState('');
   const activeRun = useRef('');
   const desktop = isTauri();
+  const macOS = desktop && /Mac/i.test(navigator.platform);
   const dirty = content !== saved;
   useEffect(() => { if (view === 'files') setRootExpanded(true); }, [view]);
 
@@ -258,9 +259,9 @@ function App() {
   const executeSql = async () => { try { setBusy(true); setResult(await invoke<Result>('run_sql', { sql })); setNotice(''); } catch (e) { setResult(null); fail(e); } finally { setBusy(false); } };
   const tree = (path: string, depth = 0): React.ReactNode => (entries[path] || []).map(entry => <React.Fragment key={entry.path}><button className={`tree-item ${file === entry.path ? 'selected' : ''}`} style={{ paddingLeft: 12 + depth * 15 }} onClick={() => entry.is_dir ? void toggleFolder(entry.path) : void openFile(entry.path)} title={entry.path}>{entry.is_dir ? (expanded[entry.path] ? <ChevronDown size={13}/> : <ChevronRight size={13}/>) : <span className="tree-spacer"/>}{entry.is_dir ? <Folder size={15}/> : <FileCode2 size={15}/>}<span>{entry.name}</span></button>{entry.is_dir && expanded[entry.path] && tree(entry.path, depth + 1)}</React.Fragment>);
 
-  return <div className="app-shell">
+  return <div className={`app-shell${macOS ? ' macos' : ''}`}>
     <aside className="sidebar">
-      <div className="brand"><div className="brand-mark"><img src={seabirdLogo} alt=""/></div><div><strong>seabird</strong><small>YOUR LOCAL WORKSPACE</small></div><PanelLeft className="sidebar-icon" size={16}/></div>
+      <div className="brand" data-tauri-drag-region><div className="brand-mark" data-tauri-drag-region><img src={seabirdLogo} alt="" draggable={false} data-tauri-drag-region/></div><div data-tauri-drag-region><strong data-tauri-drag-region>seabird</strong><small data-tauri-drag-region>YOUR LOCAL WORKSPACE</small></div><PanelLeft className="sidebar-icon" size={16}/></div>
       <div className="sidebar-scroll"><div className="side-label">工作空间 <button onClick={chooseFolder} title="选择工作目录"><Plus size={15}/></button></div>
         <button className="workspace-switch" onClick={chooseFolder}><span className="workspace-icon"><FolderOpen size={16}/></span><span className="workspace-name"><b>{root ? basename(root) : '选择工作目录'}</b><small>{root ? '本地工作空间' : '打开一个本地文件夹'}</small></span><ChevronDown size={15}/></button>
         <div className="side-label navigation-label">工作台</div>
@@ -269,7 +270,7 @@ function App() {
         {root ? <div className="file-tree"><button className="tree-root" aria-expanded={rootExpanded} onClick={() => setRootExpanded(open => !open)}>{rootExpanded ? <ChevronDown size={13}/> : <ChevronRight size={13}/>}<span>{basename(root)}</span></button>{rootExpanded && tree(root)}</div> : <p className="side-empty">打开文件夹后，文件会显示在这里。</p>}
       </div><div className="sidebar-bottom"><div className="status-dot"/><span>本地工作台</span><span className="sidebar-version">v0.1</span></div>
     </aside>
-    <main className="main"><header className="topbar"><div className="breadcrumbs"><span>工作空间</span><ChevronRight size={14}/><strong>{view === 'home' ? '概览' : view === 'agent' ? 'Agent' : view === 'files' ? '文件' : '数据库'}</strong></div><div className="top-actions"><span className="local-badge"><span/> 本地运行</span><button className="icon-button" title="刷新工具状态" onClick={detect}><RefreshCw size={16}/></button></div></header>
+    <main className="main"><header className="topbar" data-tauri-drag-region><div className="breadcrumbs"><span>工作空间</span><ChevronRight size={14}/><strong>{view === 'home' ? '概览' : view === 'agent' ? 'Agent' : view === 'files' ? '文件' : '数据库'}</strong></div><div className="top-actions"><span className="local-badge"><span/> 本地运行</span><button className="icon-button" title="刷新工具状态" onClick={detect}><RefreshCw size={16}/></button></div></header>
       {notice && <div className="notice" role="status">{notice}<button onClick={() => setNotice('')} aria-label="关闭提示"><X size={15}/></button></div>}
       {view === 'home' && <div className="page home-page"><div className="page-heading"><div><div className="eyebrow"><span className="eyebrow-line"/> YOUR SPACE TO CREATE</div><h1>你的工作，<br/><span>从这里开始。</span></h1><p>文件、数据和 AI 助手，聚在一个顺手的地方。</p></div><div className="heading-symbol"><img src={seabirdLogo} alt=""/><small>LOCAL FIRST<br/>MADE FOR YOU</small></div></div>
         <div className="section-head"><div><span className="section-kicker">WORKSPACE</span><h2>当前工作空间</h2></div><button className="text-button" onClick={chooseFolder}>{root ? '切换目录' : '选择目录'} <ArrowUpRight size={15}/></button></div>

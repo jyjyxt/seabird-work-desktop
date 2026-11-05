@@ -13,6 +13,9 @@
     "windows": [
       {
         "title": "seabird",
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
+        "trafficLightPosition": { "x": 16, "y": 20 },
         "width": 1440,
         "height": 900,
         "minWidth": 880,

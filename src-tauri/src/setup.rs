@@ -60,6 +60,20 @@ fn read_settings_at(path: &Path) -> Result<Settings, String> {
 }
 fn save_settings_at(path: &Path, settings: &Settings) -> Result<(), String> {
     fs::create_dir_all(path.parent().ok_or("无效配置目录")?).map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(
+            path.parent().ok_or("无效配置目录")?,
+            fs::Permissions::from_mode(0o700),
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    let production_config = config_file().ok().as_deref() == Some(path);
+    if production_config && path.exists() {
+        crate::backup::configuration(path)
+            .map_err(|error| format!("无法备份原配置，未修改本地配置：{error}"))?;
+    }
     let bytes = serde_json::to_vec_pretty(settings).map_err(|e| e.to_string())?;
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let temp = path.with_extension(format!(
@@ -68,9 +82,18 @@ fn save_settings_at(path: &Path, settings: &Settings) -> Result<(), String> {
         NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ));
     fs::write(&temp, bytes).map_err(|e| format!("无法保存连接配置：{e}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&temp, fs::Permissions::from_mode(0o600)).map_err(|e| e.to_string())?;
+    }
     if let Err(e) = fs::rename(&temp, path) {
         let _ = fs::remove_file(&temp);
         return Err(format!("无法保存连接配置：{e}"));
+    }
+    if production_config {
+        crate::backup::configuration(path)
+            .map_err(|error| format!("本地配置已保存，但备份失败：{error}"))?;
     }
     Ok(())
 }
@@ -162,7 +185,11 @@ fn workspace(explicit: Option<&str>, settings: &Settings) -> Result<PathBuf, Str
     Ok(path)
 }
 
-fn run_command(executable: &str, args: &[&str], timeout: Duration) -> Result<Output, String> {
+pub(crate) fn run_command(
+    executable: &str,
+    args: &[&str],
+    timeout: Duration,
+) -> Result<Output, String> {
     let mut child = Command::new(executable)
         .args(args)
         .stdin(Stdio::null())

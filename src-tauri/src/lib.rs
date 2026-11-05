@@ -1,7 +1,9 @@
 mod agent_adapter;
 mod agents;
+mod backup;
 mod bridge;
 mod cli;
+mod content;
 mod interactive;
 mod setup;
 mod workspace;
@@ -531,17 +533,66 @@ fn launch_agent(root: String, id: String) -> Result<(), String> {
 fn database(app: &tauri::AppHandle) -> Result<Connection, String> {
     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let conn = Connection::open(dir.join("workbench.sqlite3")).map_err(|e| e.to_string())?;
+    let path = dir.join("workbench.sqlite3");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).map_err(|e| e.to_string())?;
+        let file = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(&path)
+            .map_err(|e| e.to_string())?;
+        file.set_permissions(fs::Permissions::from_mode(0o600))
+            .map_err(|e| e.to_string())?;
+    }
+    let conn = Connection::open(path).map_err(|e| e.to_string())?;
+    conn.busy_timeout(std::time::Duration::from_secs(5))
+        .map_err(|e| e.to_string())?;
     conn.execute_batch("CREATE TABLE IF NOT EXISTS notes (id INTEGER PRIMARY KEY, title TEXT NOT NULL, content TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);").map_err(|e| e.to_string())?;
+    let latest = dir
+        .parent()
+        .ok_or("无法找到应用数据目录")?
+        .join("com.seabird.workbench-backups")
+        .join("workbench-latest.sqlite3");
+    if !latest.exists() {
+        if let Err(error) = backup_database(app, &conn, false, false) {
+            eprintln!("本地数据库备份失败：{error}");
+        }
+    }
     Ok(conn)
+}
+fn backup_database(
+    app: &tauri::AppHandle,
+    conn: &Connection,
+    throttle: bool,
+    preserve: bool,
+) -> Result<(), String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    backup::database(conn, &dir, throttle, preserve)
 }
 #[tauri::command]
 fn run_sql(app: tauri::AppHandle, sql: String) -> Result<QueryResult, String> {
     let conn = database(&app)?;
     let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+    let writes = !stmt.readonly();
+    if writes {
+        drop(stmt);
+        backup_database(&app, &conn, false, true)
+            .map_err(|e| format!("无法创建执行前备份，未执行 SQL：{e}"))?;
+        stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+    }
     let columns: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
     if columns.is_empty() {
-        let count = stmt.execute([]).map_err(|e| e.to_string())?;
+        drop(stmt);
+        let count = conn.execute(&sql, []).map_err(|e| e.to_string())?;
+        if writes {
+            if let Err(error) = backup_database(&app, &conn, false, false) {
+                eprintln!("本地数据库备份失败：{error}");
+            }
+        }
         return Ok(QueryResult {
             columns,
             rows: vec![],
@@ -567,6 +618,13 @@ fn run_sql(app: tauri::AppHandle, sql: String) -> Result<QueryResult, String> {
         }
         rows.push(cells);
     }
+    drop(cursor);
+    drop(stmt);
+    if writes {
+        if let Err(error) = backup_database(&app, &conn, false, false) {
+            eprintln!("本地数据库备份失败：{error}");
+        }
+    }
     let message = format!(
         "返回 {} 行{}",
         rows.len(),
@@ -590,6 +648,16 @@ fn database_path(app: tauri::AppHandle) -> Result<String, String> {
         .app_data_dir()
         .map_err(|e| e.to_string())?
         .join(Path::new("workbench.sqlite3"))
+        .to_string_lossy()
+        .into_owned())
+}
+#[tauri::command]
+fn backup_path(app: tauri::AppHandle) -> Result<String, String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    Ok(dir
+        .parent()
+        .ok_or("无法找到应用数据目录")?
+        .join("com.seabird.workbench-backups")
         .to_string_lossy()
         .into_owned())
 }
@@ -623,7 +691,11 @@ fn save_conversation(
     conversation: serde_json::Value,
 ) -> Result<(), String> {
     let conn = database(&app)?;
-    write_conversation(&conn, &root, &conversation)
+    write_conversation(&conn, &root, &conversation)?;
+    if let Err(error) = backup_database(&app, &conn, true, false) {
+        eprintln!("本地数据库备份失败：{error}");
+    }
+    Ok(())
 }
 fn ensure_conversations(conn: &Connection) -> Result<(), String> {
     conn.execute_batch("CREATE TABLE IF NOT EXISTS agent_conversations (id TEXT PRIMARY KEY, root TEXT NOT NULL, data TEXT NOT NULL, updated_at INTEGER NOT NULL)").map_err(|e| e.to_string())
@@ -695,7 +767,14 @@ pub fn run() {
             unregister_bridge,
             launch_agent,
             run_sql,
-            database_path
+            database_path,
+            backup_path,
+            content::content_load,
+            content::content_save_material,
+            content::content_save_article,
+            content::content_delete,
+            content::content_import_media,
+            content::content_trends
         ])
         .run(tauri::generate_context!())
         .expect("error while running Seabird");

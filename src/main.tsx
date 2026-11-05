@@ -3,14 +3,15 @@ import { createRoot } from 'react-dom/client';
 import { invoke, isTauri } from '@tauri-apps/api/core';
 import { open } from '@tauri-apps/plugin-dialog';
 import { listen } from '@tauri-apps/api/event';
-import { ArrowUpRight, Bot, Braces, ChevronDown, ChevronRight, Database, FileCode2, FileText, Folder, FolderOpen, HardDrive, Layers2, PanelLeft, Play, Plus, RefreshCw, Save, Send, X } from 'lucide-react';
+import { ArrowUpRight, Bookmark, Bot, Braces, ChevronDown, ChevronRight, Compass, Database, FileCode2, FileText, Folder, FolderOpen, HardDrive, Layers2, PanelLeft, Play, RefreshCw, Save, Send, X } from 'lucide-react';
 import seabirdLogo from './assets/seabird.svg';
 import './styles.css';
+import ContentWorkspace, { type ContentView } from './ContentWorkspace';
 
 type Entry = { name: string; path: string; is_dir: boolean };
 type Agent = { id: string; path: string | null };
 type Result = { columns: string[]; rows: string[][]; message: string };
-type View = 'home' | 'agent' | 'files' | 'database';
+type View = ContentView | 'agent' | 'files' | 'database' | 'settings';
 type AgentEvent = { run_id: string; kind: 'output' | 'activity' | 'session' | 'request' | 'request_resolved' | 'done' | 'error'; text: string };
 type Conversation = { id: string; agent: string; sessionId: string; output: string; title: string };
 type AgentRequest = { key: string; method: string; params: Record<string, any> };
@@ -43,6 +44,7 @@ function App() {
   const [sql, setSql] = useState('SELECT * FROM notes ORDER BY created_at DESC;');
   const [result, setResult] = useState<Result | null>(null);
   const [dbPath, setDbPath] = useState('');
+  const [backupPath, setBackupPath] = useState('');
   const [notice, setNotice] = useState('');
   const [busy, setBusy] = useState(false);
   const [selectedAgent, setSelectedAgent] = useState('codex');
@@ -96,6 +98,10 @@ function App() {
   const [setupReport, setSetupReport] = useState<SetupReport | null>(null);
   const [setupCommand, setSetupCommand] = useState('');
   const activeRun = useRef('');
+  const contentDirty = useRef(false);
+  const contentBusy = useRef(false);
+  const setContentDirty = useCallback((value: boolean) => { contentDirty.current = value; }, []);
+  const setContentBusy = useCallback((value: boolean) => { contentBusy.current = value; }, []);
   const desktop = isTauri();
   const macOS = desktop && /Mac/i.test(navigator.platform);
   const dirty = content !== saved;
@@ -107,7 +113,7 @@ function App() {
     const items = await invoke<Entry[]>('list_files', { root: workspace, path });
     setEntries(previous => ({ ...previous, [path]: items }));
   }, []);
-  useEffect(() => { void detect(); if (desktop) invoke<string>('database_path').then(setDbPath).catch(fail); }, [desktop, detect]);
+  useEffect(() => { void detect(); if (desktop) { invoke<string>('database_path').then(setDbPath).catch(fail); invoke<string>('backup_path').then(setBackupPath).catch(fail); } }, [desktop, detect]);
   useEffect(() => {
     if (!desktop) return;
     let cancelled = false;
@@ -175,7 +181,9 @@ function App() {
   const chooseFolder = async () => {
     if (!desktop) { setNotice('请在桌面应用中选择本地文件夹。'); return; }
     if (agentRunning || connecting) { setNotice('正在执行任务或连接 Agent，请结束后再切换目录。'); return; }
+    if (contentBusy.current) { setNotice('正在保存内容或导入文件，请完成后再切换目录。'); return; }
     if (!confirmDiscard()) return;
+    if (contentDirty.current && !window.confirm('素材或文章有未保存的修改，切换目录将丢失这些修改，确定继续吗？')) return;
     try {
       const selected = await open({ directory: true, multiple: false, title: '选择工作目录' });
       if (typeof selected === 'string') { await invoke('remember_workspace', { root: selected }); if (selected !== root) { setCurrentId(''); setRequests([]); } setRoot(selected); localStorage.setItem('seabird-root', selected); setEntries({}); setExpanded({}); setFile(''); setContent(''); setSaved(''); setSetupReport(null); setNotice(''); }
@@ -188,7 +196,7 @@ function App() {
   };
   const save = async () => { if (!file) return; try { await invoke('write_file', { root, path: file, content }); setSaved(content); setNotice('文件已保存'); } catch (e) { fail(e); } };
   useEffect(() => {
-    const onKey = (event: KeyboardEvent) => { if (!(event.metaKey || event.ctrlKey)) return; if (event.key.toLowerCase() === 's' && file) { event.preventDefault(); void save(); } else if (['1', '2', '3'].includes(event.key)) { event.preventDefault(); setView(({ '1': 'home', '2': 'files', '3': 'database' } as const)[event.key as '1' | '2' | '3']); } };
+    const onKey = (event: KeyboardEvent) => { if (!(event.metaKey || event.ctrlKey)) return; if (event.key.toLowerCase() === 's' && file && view === 'files') { event.preventDefault(); void save(); } else if (['1', '2', '3'].includes(event.key)) { event.preventDefault(); setView(({ '1': 'home', '2': 'materials', '3': 'articles' } as const)[event.key as '1' | '2' | '3']); } };
     window.addEventListener('keydown', onKey); return () => window.removeEventListener('keydown', onKey);
   });
   const toggleFolder = async (path: string) => { if (!expanded[path]) { try { await loadFolder(root, path); } catch (e) { fail(e); return; } } setExpanded(p => ({ ...p, [path]: !p[path] })); };
@@ -262,24 +270,21 @@ function App() {
   return <div className={`app-shell${macOS ? ' macos' : ''}`}>
     <aside className="sidebar">
       <div className="brand" data-tauri-drag-region><div className="brand-mark" data-tauri-drag-region><img src={seabirdLogo} alt="" draggable={false} data-tauri-drag-region/></div><div data-tauri-drag-region><strong data-tauri-drag-region>seabird</strong><small data-tauri-drag-region>YOUR LOCAL WORKSPACE</small></div><PanelLeft className="sidebar-icon" size={16}/></div>
-      <div className="sidebar-scroll"><div className="side-label">工作空间 <button onClick={chooseFolder} title="选择工作目录"><Plus size={15}/></button></div>
-        <button className="workspace-switch" onClick={chooseFolder}><span className="workspace-icon"><FolderOpen size={16}/></span><span className="workspace-name"><b>{root ? basename(root) : '选择工作目录'}</b><small>{root ? '本地工作空间' : '打开一个本地文件夹'}</small></span><ChevronDown size={15}/></button>
-        <div className="side-label navigation-label">工作台</div>
-        <nav><button className={`nav-item ${view === 'home' ? 'active' : ''}`} onClick={() => setView('home')}><Layers2 size={17}/> 概览 <span>⌘ 1</span></button><button className={`nav-item ${view === 'agent' ? 'active' : ''}`} onClick={() => setView('agent')}><Bot size={17}/> Agent</button><button className={`nav-item ${view === 'files' ? 'active' : ''}`} onClick={() => { setView('files'); setRootExpanded(true); }}><Folder size={17}/> 文件 <span>⌘ 2</span></button><button className={`nav-item ${view === 'database' ? 'active' : ''}`} onClick={() => setView('database')}><Database size={17}/> 数据库 <span>⌘ 3</span></button></nav>
-        <div className="side-label files-label">文件浏览器 <button onClick={() => root && loadFolder(root, root).catch(fail)} title="刷新文件"><RefreshCw size={13}/></button></div>
-        {root ? <div className="file-tree"><button className="tree-root" aria-expanded={rootExpanded} onClick={() => setRootExpanded(open => !open)}>{rootExpanded ? <ChevronDown size={13}/> : <ChevronRight size={13}/>}<span>{basename(root)}</span></button>{rootExpanded && tree(root)}</div> : <p className="side-empty">打开文件夹后，文件会显示在这里。</p>}
+      <div className="sidebar-scroll">
+        <nav><button className={`nav-item ${view === 'home' ? 'active' : ''}`} onClick={() => setView('home')}><Layers2 size={17}/> 工作台 <span>⌘ 1</span></button></nav>
+        <div className="side-label navigation-label">内容</div>
+        <nav><button className={`nav-item ${view === 'materials' ? 'active' : ''}`} onClick={() => setView('materials')}><Bookmark size={17}/> 素材 <span>⌘ 2</span></button><button className={`nav-item ${view === 'articles' ? 'active' : ''}`} onClick={() => setView('articles')}><FileText size={17}/> 文章 <span>⌘ 3</span></button></nav>
+        <div className="side-label navigation-label">发现</div>
+        <nav><button className={`nav-item ${view === 'discover' ? 'active' : ''}`} onClick={() => setView('discover')}><Compass size={17}/> 热点发现</button></nav>
+        <div className="side-label navigation-label">工具</div>
+        <nav><button className={`nav-item ${view === 'agent' ? 'active' : ''}`} onClick={() => setView('agent')}><Bot size={17}/> Agent</button><button className={`nav-item ${view === 'settings' || view === 'files' || view === 'database' ? 'active' : ''}`} onClick={() => setView('settings')}><Folder size={17}/> 设置与文件</button></nav>
+        {view === 'files' && <><div className="side-label files-label">文件浏览器 <button onClick={() => root && loadFolder(root, root).catch(fail)} title="刷新文件"><RefreshCw size={13}/></button></div>{root ? <div className="file-tree"><button className="tree-root" aria-expanded={rootExpanded} onClick={() => setRootExpanded(open => !open)}>{rootExpanded ? <ChevronDown size={13}/> : <ChevronRight size={13}/>}<span>{basename(root)}</span></button>{rootExpanded && tree(root)}</div> : <p className="side-empty">打开文件夹后，文件会显示在这里。</p>}</>}
       </div><div className="sidebar-bottom"><div className="status-dot"/><span>本地工作台</span><span className="sidebar-version">v0.1</span></div>
     </aside>
-    <main className="main"><header className="topbar" data-tauri-drag-region><div className="breadcrumbs"><span>工作空间</span><ChevronRight size={14}/><strong>{view === 'home' ? '概览' : view === 'agent' ? 'Agent' : view === 'files' ? '文件' : '数据库'}</strong></div><div className="top-actions"><span className="local-badge"><span/> 本地运行</span><button className="icon-button" title="刷新工具状态" onClick={detect}><RefreshCw size={16}/></button></div></header>
+    <main className="main"><header className="topbar" data-tauri-drag-region><div className="breadcrumbs"><span>内容工作台</span><ChevronRight size={14}/><strong>{({ home: '工作台', materials: '素材', articles: '文章', discover: '热点发现', agent: 'Agent', files: '文件', database: '数据库', settings: '设置与文件' } as const)[view]}</strong></div><div className="top-actions"><span className="local-badge"><span/> 本地运行</span><button className="icon-button" title="刷新工具状态" onClick={detect}><RefreshCw size={16}/></button></div></header>
       {notice && <div className="notice" role="status">{notice}<button onClick={() => setNotice('')} aria-label="关闭提示"><X size={15}/></button></div>}
-      {view === 'home' && <div className="page home-page"><div className="page-heading"><div><div className="eyebrow"><span className="eyebrow-line"/> YOUR SPACE TO CREATE</div><h1>你的工作，<br/><span>从这里开始。</span></h1><p>文件、数据和 AI 助手，聚在一个顺手的地方。</p></div><div className="heading-symbol"><img src={seabirdLogo} alt=""/><small>LOCAL FIRST<br/>MADE FOR YOU</small></div></div>
-        <div className="section-head"><div><span className="section-kicker">WORKSPACE</span><h2>当前工作空间</h2></div><button className="text-button" onClick={chooseFolder}>{root ? '切换目录' : '选择目录'} <ArrowUpRight size={15}/></button></div>
-        <div className="workspace-card"><div className="folder-art"><FolderOpen size={26} strokeWidth={1.5}/></div><div className="workspace-card-copy"><div className="card-title">{root ? basename(root) : '打开你的第一个文件夹'} <span className="outline-badge">LOCAL</span></div><p>{root || '选择一个本地文件夹，开始浏览和编辑文件。'}</p></div><button className="secondary-button" onClick={chooseFolder}>{root ? '更换' : '选择文件夹'} <ArrowUpRight size={15}/></button></div>
-        <div className="section-head agent-heading"><div><span className="section-kicker">YOUR ASSISTANTS</span><h2>AI 助手 <span className="count">{agents.filter(a => a.path).length} / 2 已安装</span></h2></div><button className="text-button" onClick={detect}><RefreshCw size={14}/> 重新检测</button></div>
-        <div className="agent-grid">{Object.entries(agentInfo).map(([id, info]) => { const agent = agents.find(a => a.id === id); return <div className="agent-card" key={id}><div className="agent-top"><div className={`agent-mark ${info.color}`}>{info.mark}</div><span className={`agent-status ${agent?.path ? 'ready' : ''}`}><i/>{agent?.path ? '已安装' : '未检测到'}</span></div><h3>{info.name}</h3><p>{info.description}</p><div className="agent-bottom"><span title={agent?.path || '请先安装命令行程序'}>{agent?.path ? '命令行已就绪' : '需要安装命令行程序'}</span><button disabled={!agent?.path || busy || agentRunning} onClick={() => { chooseAgent(id); setView('agent'); }} aria-label={`使用 ${info.name}`} title={`使用 ${info.name}`}><ArrowUpRight size={17}/></button></div></div>; })}</div>
-        <div className="section-head quick-heading"><div><span className="section-kicker">PICK UP WHERE YOU LEFT OFF</span><h2>快捷访问</h2></div></div><div className="quick-grid"><button onClick={() => setView('files')}><span className="quick-icon blue"><FileText size={18}/></span><span><b>浏览文件</b><small>查看并编辑工作目录</small></span><ArrowUpRight size={16}/></button><button onClick={() => setView('database')}><span className="quick-icon purple"><Database size={18}/></span><span><b>SQLite 数据库</b><small>查询和管理本地数据</small></span><ArrowUpRight size={16}/></button></div>
-        <div className="home-footer"><span><span className="status-dot"/> 一切都在你的设备上</span><span>想法在这里落地 <span className="footer-star">✳</span></span></div>
-      </div>}
+      <ContentWorkspace view={view} root={root} desktop={desktop} onNavigate={setView} onDirty={setContentDirty} onBusy={setContentBusy} onAgent={(task) => { if (agentRunning) { setNotice('Agent 正在执行任务，请结束后再发送新任务。'); return; } if (prompt.trim() && !window.confirm('Agent 输入框已有未发送的内容，确定替换吗？')) return; setPrompt(task); setCurrentId(''); setView('agent'); }}/>
+      {view === 'settings' && <div className="page tool-page"><div className="tool-heading"><div><span className="section-kicker">SETTINGS</span><h1>设置与文件</h1><p>管理本地内容位置与高级工具。</p></div></div><div className="workspace-card"><div className="folder-art"><FolderOpen size={24}/></div><div className="workspace-card-copy"><div className="card-title">本地素材目录</div><p>{root || '尚未选择目录'}</p></div><button className="secondary-button" onClick={chooseFolder}>切换目录</button></div><p className="settings-note">图片和视频保存在此目录。切换目录会显示该目录对应的素材和文章；数据库与连接配置保存在系统应用数据目录。</p><div className="settings-storage"><b>数据库与配置备份</b><span>{backupPath || '桌面应用中显示备份位置'}</span><small>素材与文章保存后会更新本地数据库备份；连接配置也会保留备份。备份不包含图片和视频文件，请另行备份素材目录。</small></div><div className="quick-grid settings-tools"><button onClick={() => setView('files')}><span className="quick-icon blue"><FileText size={18}/></span><span><b>浏览本地文件</b><small>查看当前目录的文件</small></span><ArrowUpRight size={16}/></button><button onClick={() => setView('database')}><span className="quick-icon purple"><Database size={18}/></span><span><b>数据库工具</b><small>查看本地数据与数据库位置</small></span><ArrowUpRight size={16}/></button></div></div>}
       {view === 'agent' && <div className="page tool-page agent-page"><div className="tool-heading"><div><span className="section-kicker">YOUR LOCAL AGENTS</span><h1>Agent 工作台</h1><p>在 Seabird 中使用本机 Codex 或 Claude Code；对话无需先配置 MCP。</p></div></div>
         <div className="agent-workspace"><FolderOpen size={16}/><span>当前工作目录</span><strong title={root}>{root || '尚未选择'}</strong><button className="text-button" onClick={chooseFolder}>切换</button></div>
         {setupReport && <div className="setup-results"><div className="panel-title"><span>上次连接结果{setupReport.ok ? ' · 配置完成' : ' · 部分项目需要处理'}</span><small>工作目录：{setupReport.workspace}</small></div>{setupReport.agents.map(agent => <div className="setup-result" key={agent.id}><span><b>{agentInfo[agent.id]?.name || agent.id}</b><small>{agent.version || '未检测到'}{agent.path ? ` · ${agent.path}` : ''}</small></span><div><strong className={agent.bridge === 'connected' ? 'setup-success' : 'setup-warning'}>{agent.bridge === 'connected' ? 'MCP 已配置' : agent.bridge === 'not_installed' ? '未安装' : agent.bridge === 'conflict' ? '配置冲突' : '需要处理'}</strong><small>{agent.auth === 'configured' ? '登录已配置，实际请求时验证' : agent.auth === 'not_logged_in' ? '未登录' : '登录状态未知'} · {agent.detail}</small></div></div>)}</div>}

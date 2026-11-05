@@ -5,9 +5,9 @@ import { Eye, Heading2, Heading3, ImagePlus, Sparkles, Video } from 'lucide-reac
 import { articleHtml, articleMarkdown, mediaFileUrl } from './articleFormat';
 
 type MediaFile = { path: string; name: string; kind: 'image' | 'video' };
-type Props = { root: string; desktop: boolean; title: string; body: string; original: boolean; onTitle: (value: string) => void; onBody: (value: string) => void; onBusy: (busy: boolean) => void; onMessage: (value: string) => void; onError: (value: string) => void; isCurrent: () => boolean; onEditSelection: (selection: { start: number; end: number; text: string }, body: string) => void };
+type Props = { root: string; desktop: boolean; title: string; body: string; onTitle: (value: string) => void; onBody: (value: string) => void; onBusy: (busy: boolean) => void; onMessage: (value: string) => void; onError: (value: string) => void; isCurrent: () => boolean; onEditSelection: (selection: { start: number; end: number; text: string }, body: string) => void };
 
-export default function ArticleEditor({ root, desktop, title, body, original, onTitle, onBody, onBusy, onMessage, onError, isCurrent, onEditSelection }: Props) {
+export default function ArticleEditor({ root, desktop, title, body, onTitle, onBody, onBusy, onMessage, onError, isCurrent, onEditSelection }: Props) {
   const input = useRef<HTMLTextAreaElement>(null);
   const currentBody = useRef(body);
   currentBody.current = body;
@@ -60,7 +60,7 @@ export default function ArticleEditor({ root, desktop, title, body, original, on
     return convertFileSrc(path);
   };
   return <>
-    <input className="content-title-input" aria-label={original ? '文章标题' : '平台标题'} placeholder={original ? '文章标题' : '平台标题'} value={title} onChange={e => onTitle(e.target.value)}/>
+    <input className="content-title-input" aria-label="文章标题" placeholder="文章标题" value={title} onChange={e => onTitle(e.target.value)}/>
     <div className="article-editor-toolbar" role="toolbar" aria-label="文章编辑工具">
       <button type="button" onMouseDown={e => e.preventDefault()} onClick={() => heading(2)} disabled={preview} title="二级标题"><Heading2 size={16}/> 标题</button>
       <button type="button" onMouseDown={e => e.preventDefault()} onClick={() => heading(3)} disabled={preview} title="三级标题"><Heading3 size={16}/> 小标题</button>
@@ -72,6 +72,6 @@ export default function ArticleEditor({ root, desktop, title, body, original, on
       <button type="button" onClick={() => void copy('markdown')}>复制 Markdown</button>
       <button type="button" onClick={() => void copy('html')}>复制 HTML</button>
     </div>
-    {preview ? <div className="article-preview" onClick={e => { if ((e.target as HTMLElement).closest('a')) e.preventDefault(); }} dangerouslySetInnerHTML={{ __html: articleHtml('', body, previewFile) }}/> : <textarea ref={input} className="content-body-input" aria-label={original ? '文章原稿' : '平台正文'} placeholder={original ? '写下你的想法……' : '在这里写下适合这个平台的版本……'} value={body} onSelect={e => setHasSelection(e.currentTarget.selectionStart !== e.currentTarget.selectionEnd)} onChange={e => onBody(e.target.value)}/>}
+    {preview ? <div className="article-preview" onClick={e => { if ((e.target as HTMLElement).closest('a')) e.preventDefault(); }} dangerouslySetInnerHTML={{ __html: articleHtml('', body, previewFile) }}/> : <textarea ref={input} className="content-body-input" aria-label="文章正文" placeholder="写下你的想法……" value={body} onSelect={e => setHasSelection(e.currentTarget.selectionStart !== e.currentTarget.selectionEnd)} onChange={e => onBody(e.target.value)}/>}
   </>;
 }

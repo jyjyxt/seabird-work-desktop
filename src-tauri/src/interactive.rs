@@ -447,12 +447,36 @@ fn build_response(
         let offered = request.params["availableDecisions"].as_array();
         let accepts =
             |value: &str| offered.is_none_or(|choices| choices.iter().any(|v| v == value));
-        let decision = if allow && accepts("accept") {
-            "accept"
+        let amendment = if request.method == "item/commandExecution/requestApproval" {
+            offered.and_then(|choices| {
+                choices.iter().find(|choice| {
+                    choice
+                        .get("acceptWithExecpolicyAmendment")
+                        .and_then(|value| value.get("execpolicy_amendment"))
+                        .and_then(Value::as_array)
+                        .is_some_and(|prefix| {
+                            !prefix.is_empty()
+                                && prefix.iter().all(|part| {
+                                    part.as_str().is_some_and(|value| !value.is_empty())
+                                })
+                        })
+                })
+            })
+        } else {
+            None
+        };
+        let decision = if allow && amendment.is_some() {
+            amendment.cloned().unwrap()
+        } else if allow
+            && offered.is_some_and(|choices| choices.iter().any(|v| v == "acceptForSession"))
+        {
+            json!("acceptForSession")
+        } else if allow && accepts("accept") {
+            json!("accept")
         } else if !allow && accepts("decline") {
-            "decline"
+            json!("decline")
         } else if !allow && accepts("cancel") {
-            "cancel"
+            json!("cancel")
         } else {
             return Err("此请求不支持该选择".into());
         };
@@ -494,6 +518,29 @@ mod tests {
             json!({"availableDecisions":["decline"]}),
         );
         assert!(build_response(&restricted, "allow", HashMap::new()).is_err());
+        let amendment =
+            json!({"acceptWithExecpolicyAmendment":{"execpolicy_amendment":["python3", "-c"]}});
+        let p = request(
+            "item/commandExecution/requestApproval",
+            json!({"availableDecisions":["accept", amendment, "decline"]}),
+        );
+        assert_eq!(
+            build_response(&p, "allow", HashMap::new()).unwrap()["result"]["decision"],
+            amendment
+        );
+        let p = request(
+            "item/commandExecution/requestApproval",
+            json!({"availableDecisions":["accept", "acceptForSession", "decline"]}),
+        );
+        assert_eq!(
+            build_response(&p, "allow", HashMap::new()).unwrap()["result"]["decision"],
+            "acceptForSession"
+        );
+        let p = request("item/commandExecution/requestApproval", json!({}));
+        assert_eq!(
+            build_response(&p, "allow", HashMap::new()).unwrap()["result"]["decision"],
+            "accept"
+        );
         let p = request(
             "item/permissions/requestApproval",
             json!({"permissions":{"network":{"enabled":true}}}),

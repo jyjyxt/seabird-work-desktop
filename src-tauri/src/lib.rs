@@ -683,24 +683,44 @@ fn backup_path(app: tauri::AppHandle) -> Result<String, String> {
 fn list_conversations(
     app: tauri::AppHandle,
     root: String,
-) -> Result<Vec<serde_json::Value>, String> {
+) -> Result<Vec<ConversationEntry>, String> {
     let conn = database(&app)?;
-    read_conversations(&conn, &root)
+    read_conversations_with_timestamps(&conn, &root)
 }
-fn read_conversations(conn: &Connection, root: &str) -> Result<Vec<serde_json::Value>, String> {
+#[derive(serde::Serialize)]
+struct ConversationEntry {
+    conversation: serde_json::Value,
+    updated_at: i64,
+}
+fn read_conversations_with_timestamps(
+    conn: &Connection,
+    root: &str,
+) -> Result<Vec<ConversationEntry>, String> {
     ensure_conversations(conn)?;
     let mut stmt = conn
-        .prepare("SELECT data FROM agent_conversations WHERE root = ?1 ORDER BY updated_at DESC")
+        .prepare("SELECT data, updated_at FROM agent_conversations WHERE root = ?1 ORDER BY updated_at DESC")
         .map_err(|e| e.to_string())?;
     let rows = stmt
-        .query_map([root], |row| row.get::<_, String>(0))
+        .query_map([root], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })
         .map_err(|e| e.to_string())?;
     let mut result = Vec::new();
     for row in rows {
-        let value = row.map_err(|e| e.to_string())?;
-        result.push(serde_json::from_str(&value).map_err(|e| e.to_string())?);
+        let (value, updated_at) = row.map_err(|e| e.to_string())?;
+        result.push(ConversationEntry {
+            conversation: serde_json::from_str(&value).map_err(|e| e.to_string())?,
+            updated_at,
+        });
     }
     Ok(result)
+}
+#[cfg(test)]
+fn read_conversations(conn: &Connection, root: &str) -> Result<Vec<serde_json::Value>, String> {
+    Ok(read_conversations_with_timestamps(conn, root)?
+        .into_iter()
+        .map(|entry| entry.conversation)
+        .collect())
 }
 #[tauri::command]
 fn save_conversation(
@@ -764,6 +784,19 @@ fn write_conversation(
 mod conversation_tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn conversation_list_includes_last_update_time() {
+        let conn = Connection::open_in_memory().unwrap();
+        write_conversation(&conn, "/one", &json!({"id": "old"})).unwrap();
+        write_conversation(&conn, "/one", &json!({"id": "recent"})).unwrap();
+        conn.execute("UPDATE agent_conversations SET updated_at = CASE id WHEN 'old' THEN 1000 ELSE 2000 END", []).unwrap();
+        let entries = read_conversations_with_timestamps(&conn, "/one").unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].conversation["id"], "recent");
+        assert_eq!(entries[0].updated_at, 2000);
+        assert_eq!(entries[1].conversation["id"], "old");
+        assert_eq!(entries[1].updated_at, 1000);
+    }
     #[test]
     fn removes_selected_or_all_conversations_only_in_current_workspace() {
         let conn = Connection::open_in_memory().unwrap();

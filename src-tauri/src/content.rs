@@ -101,7 +101,10 @@ fn init(conn: &Connection) -> Result<(), String> {
         CREATE TABLE IF NOT EXISTS content_material_media (material_id INTEGER NOT NULL REFERENCES content_materials(id) ON DELETE CASCADE, path TEXT NOT NULL, name TEXT NOT NULL, kind TEXT NOT NULL, PRIMARY KEY(material_id,path));
         CREATE TABLE IF NOT EXISTS content_articles (id INTEGER PRIMARY KEY, root TEXT NOT NULL, title TEXT NOT NULL, body TEXT NOT NULL DEFAULT '', versions TEXT NOT NULL DEFAULT '{}', tags TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
         CREATE INDEX IF NOT EXISTS content_articles_root ON content_articles(root);
-        CREATE TABLE IF NOT EXISTS content_article_materials (article_id INTEGER NOT NULL REFERENCES content_articles(id) ON DELETE CASCADE, material_id INTEGER NOT NULL REFERENCES content_materials(id) ON DELETE CASCADE, PRIMARY KEY(article_id, material_id));")
+        CREATE TABLE IF NOT EXISTS content_article_materials (article_id INTEGER NOT NULL REFERENCES content_articles(id) ON DELETE CASCADE, material_id INTEGER NOT NULL REFERENCES content_materials(id) ON DELETE CASCADE, PRIMARY KEY(article_id, material_id));
+        CREATE TABLE IF NOT EXISTS content_suggestion_saves (root TEXT NOT NULL, suggestion_key TEXT NOT NULL, kind TEXT NOT NULL, content_id INTEGER NOT NULL, PRIMARY KEY(root, suggestion_key));
+        CREATE TRIGGER IF NOT EXISTS content_material_suggestion_delete AFTER DELETE ON content_materials BEGIN DELETE FROM content_suggestion_saves WHERE root=OLD.root AND kind='material' AND content_id=OLD.id; END;
+        CREATE TRIGGER IF NOT EXISTS content_article_suggestion_delete AFTER DELETE ON content_articles BEGIN DELETE FROM content_suggestion_saves WHERE root=OLD.root AND kind='article' AND content_id=OLD.id; END;")
         .map_err(|e| e.to_string())?;
     let has_tags = || -> Result<bool, String> {
         let mut stmt = conn
@@ -127,6 +130,56 @@ fn init(conn: &Connection) -> Result<(), String> {
                 return Err(format!("文章标签迁移失败：{error}"));
             }
         }
+    }
+    Ok(())
+}
+
+fn suggestion_existing(
+    conn: &Connection,
+    root: &str,
+    kind: &str,
+    key: Option<&str>,
+) -> Result<Option<i64>, String> {
+    let Some(key) = key else { return Ok(None) };
+    if key.len() != 64 || !key.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err("保存建议标识无效".into());
+    }
+    let found: Option<(String, i64)> = conn.query_row("SELECT kind, content_id FROM content_suggestion_saves WHERE root=?1 AND suggestion_key=?2", params![root, key], |row| Ok((row.get(0)?, row.get(1)?))).optional().map_err(|e| e.to_string())?;
+    if let Some((saved_kind, id)) = found {
+        if saved_kind != kind {
+            return Err("保存建议类型不匹配".into());
+        }
+        let sql = if kind == "material" {
+            "SELECT 1 FROM content_materials WHERE root=?1 AND id=?2"
+        } else {
+            "SELECT 1 FROM content_articles WHERE root=?1 AND id=?2"
+        };
+        if conn
+            .query_row(sql, params![root, id], |_| Ok(()))
+            .optional()
+            .map_err(|e| e.to_string())?
+            .is_some()
+        {
+            return Ok(Some(id));
+        }
+        conn.execute(
+            "DELETE FROM content_suggestion_saves WHERE root=?1 AND suggestion_key=?2",
+            params![root, key],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(None)
+}
+
+fn record_suggestion(
+    conn: &Connection,
+    root: &str,
+    kind: &str,
+    key: Option<&str>,
+    id: i64,
+) -> Result<(), String> {
+    if let Some(key) = key {
+        conn.execute("INSERT INTO content_suggestion_saves(root, suggestion_key, kind, content_id) VALUES (?1, ?2, ?3, ?4)", params![root, key, kind, id]).map_err(|e| e.to_string())?;
     }
     Ok(())
 }
@@ -211,6 +264,15 @@ fn save_material_checked(
     item: &Material,
     expected: Option<&Material>,
 ) -> Result<i64, String> {
+    save_material_with_key(conn, root, item, expected, None)
+}
+fn save_material_with_key(
+    conn: &mut Connection,
+    root: &str,
+    item: &Material,
+    expected: Option<&Material>,
+    key: Option<&str>,
+) -> Result<i64, String> {
     init(conn)?;
     if item.title.trim().is_empty() {
         return Err("请输入素材标题".into());
@@ -229,6 +291,12 @@ fn save_material_checked(
     let tx = conn
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(|e| e.to_string())?;
+    if key.is_some() && item.id != 0 {
+        return Err("保存建议只能创建新素材".into());
+    }
+    if let Some(id) = suggestion_existing(&tx, root, "material", key)? {
+        return Ok(id);
+    }
     if let Some(expected) = expected {
         if expected.id != item.id
             || load(&tx, root)?.materials.iter().find(|v| v.id == item.id) != Some(expected)
@@ -266,6 +334,7 @@ fn save_material_checked(
         )
         .map_err(|e| e.to_string())?;
     }
+    record_suggestion(&tx, root, "material", key, id)?;
     tx.commit().map_err(|e| e.to_string())?;
     Ok(id)
 }
@@ -278,6 +347,15 @@ fn save_article_checked(
     root: &str,
     item: &Article,
     expected: Option<&Article>,
+) -> Result<i64, String> {
+    save_article_with_key(conn, root, item, expected, None)
+}
+fn save_article_with_key(
+    conn: &mut Connection,
+    root: &str,
+    item: &Article,
+    expected: Option<&Article>,
+    key: Option<&str>,
 ) -> Result<i64, String> {
     init(conn)?;
     if item.title.trim().is_empty() {
@@ -294,6 +372,12 @@ fn save_article_checked(
     let tx = conn
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(|e| e.to_string())?;
+    if key.is_some() && item.id != 0 {
+        return Err("保存建议只能创建新文章".into());
+    }
+    if let Some(id) = suggestion_existing(&tx, root, "article", key)? {
+        return Ok(id);
+    }
     if let Some(expected) = expected {
         if expected.id != item.id
             || load(&tx, root)?.articles.iter().find(|v| v.id == item.id) != Some(expected)
@@ -339,6 +423,7 @@ fn save_article_checked(
         )
         .map_err(|e| e.to_string())?;
     }
+    record_suggestion(&tx, root, "article", key, id)?;
     tx.commit().map_err(|e| e.to_string())?;
     Ok(id)
 }
@@ -379,10 +464,17 @@ pub fn content_save_material(
     root: String,
     item: Material,
     expected: Option<Material>,
+    suggestion_key: Option<String>,
 ) -> Result<SaveResult, String> {
     let root = crate::workspace::root(&root)?;
     let mut conn = crate::database(&app)?;
-    let id = save_material_checked(&mut conn, &root.to_string_lossy(), &item, expected.as_ref())?;
+    let id = save_material_with_key(
+        &mut conn,
+        &root.to_string_lossy(),
+        &item,
+        expected.as_ref(),
+        suggestion_key.as_deref(),
+    )?;
     let backup_warning = crate::backup_database(&app, &conn, false, false).err();
     Ok(SaveResult { id, backup_warning })
 }
@@ -471,10 +563,17 @@ pub fn content_save_article(
     root: String,
     item: Article,
     expected: Option<Article>,
+    suggestion_key: Option<String>,
 ) -> Result<SaveResult, String> {
     let root = crate::workspace::root(&root)?;
     let mut conn = crate::database(&app)?;
-    let id = save_article_checked(&mut conn, &root.to_string_lossy(), &item, expected.as_ref())?;
+    let id = save_article_with_key(
+        &mut conn,
+        &root.to_string_lossy(),
+        &item,
+        expected.as_ref(),
+        suggestion_key.as_deref(),
+    )?;
     let backup_warning = crate::backup_database(&app, &conn, false, false).err();
     Ok(SaveResult { id, backup_warning })
 }
@@ -642,6 +741,52 @@ pub async fn content_trends() -> Result<TrendResult, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn suggestion_saves_are_idempotent_and_workspace_scoped() {
+        let mut db = Connection::open_in_memory().unwrap();
+        let key = "a".repeat(64);
+        let material = Material {
+            id: 0,
+            title: "素材".into(),
+            source: String::new(),
+            url: String::new(),
+            note: "内容".into(),
+            tags: String::new(),
+            media: vec![],
+            updated_at: String::new(),
+        };
+        let article = Article {
+            id: 0,
+            title: "文章".into(),
+            body: "正文".into(),
+            tags: String::new(),
+            versions: BTreeMap::new(),
+            material_ids: vec![],
+            updated_at: String::new(),
+        };
+        let first = save_material_with_key(&mut db, "/one", &material, None, Some(&key)).unwrap();
+        assert_eq!(
+            first,
+            save_material_with_key(&mut db, "/one", &material, None, Some(&key)).unwrap()
+        );
+        assert_eq!(load(&db, "/one").unwrap().materials.len(), 1);
+        assert!(save_article_with_key(&mut db, "/one", &article, None, Some(&key)).is_err());
+        save_material_with_key(&mut db, "/two", &material, None, Some(&key)).unwrap();
+        assert_eq!(load(&db, "/two").unwrap().materials.len(), 1);
+        delete(&db, "/one", "material", first).unwrap();
+        save_material(&mut db, "/one", &material).unwrap();
+        save_material_with_key(&mut db, "/one", &material, None, Some(&key)).unwrap();
+        assert_eq!(load(&db, "/one").unwrap().materials.len(), 2);
+        let article_key = "b".repeat(64);
+        let id =
+            save_article_with_key(&mut db, "/one", &article, None, Some(&article_key)).unwrap();
+        assert_eq!(
+            id,
+            save_article_with_key(&mut db, "/one", &article, None, Some(&article_key)).unwrap()
+        );
+        assert_eq!(load(&db, "/one").unwrap().articles.len(), 1);
+        assert!(save_material_with_key(&mut db, "/one", &material, None, Some("invalid")).is_err());
+    }
     #[test]
     fn source_links_only_allow_web_urls() {
         assert!(source_url(" https://example.com/path?q=1 ").is_ok());

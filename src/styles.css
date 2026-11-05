@@ -58,3 +58,26 @@
 .task-tools .task-context{display:inline-flex;align-items:center;gap:6px;max-width:100%;overflow-wrap:anywhere}.task-context button{border:0;padding:0 2px;background:transparent;color:inherit;font-size:14px;line-height:1;cursor:pointer}
 .article-quick-actions{display:flex;flex-wrap:wrap;gap:6px;padding:0 14px 10px}.article-quick-actions button{border:1px solid #e0e8f3;border-radius:7px;background:#f8faff;color:#6c81a1;font-size:11px;padding:6px 10px}.article-quick-actions button:hover:not(:disabled){border-color:#adc0df;background:#edf3fb}.article-quick-actions button:disabled{opacity:.5}
 .chat-save-suggestion details>small{display:block;margin-top:10px;color:#899bb3;font-size:10px}.chat-save-suggestion details pre{white-space:pre-wrap;overflow-wrap:anywhere}
+/* Keep the composer controls aligned while preserving room for the message. */
+.agent-dock .task-panel textarea{padding:14px 14px 10px}
+.agent-dock .task-tools,.agent-dock .reference-chips,.agent-dock .article-quick-actions{gap:6px;padding:0 14px 10px}
+.agent-dock .task-tools>span,.agent-dock .task-suggestion,.agent-dock .reference-chip,.agent-dock .article-quick-actions button{min-height:28px;font-size:12px;line-height:1.4}
+.agent-dock .task-tools>span,.agent-dock .reference-chip{display:inline-flex;align-items:center;padding:5px 8px}
+.agent-dock .task-context button,.agent-dock .reference-chip button{display:inline-grid;place-items:center;flex:none;width:20px;height:20px;border-radius:5px}
+.agent-dock .task-context button:hover,.agent-dock .reference-chip button:hover{background:#dfe9f6}
+.agent-dock .task-suggestion,.agent-dock .article-quick-actions button{padding:5px 9px}
+.agent-dock .task-actions{display:flex;align-items:center;justify-content:flex-start;flex-wrap:wrap;gap:6px;min-height:0;padding:8px 10px 10px}
+.agent-dock .task-actions .reference-add,.agent-dock .task-actions .primary-button,.agent-dock .task-actions .secondary-button,.agent-dock .task-actions .agent-setup-link{display:inline-flex;align-items:center;justify-content:center;min-height:34px;gap:6px;border-radius:8px;padding:7px 10px;font-size:12px;line-height:1.25;white-space:nowrap}
+.agent-dock .task-actions .primary-button span{font-size:inherit;line-height:inherit;color:inherit}
+.agent-dock .agent-select{flex:1 1 70px;min-width:0;margin:0}
+.agent-dock .agent-select select{display:block;width:auto;max-width:100%;height:34px;padding:0 22px 0 10px;font-size:12px;line-height:1.25;text-overflow:ellipsis}
+.agent-dock .task-actions>button:last-child{margin-left:auto}
+.agent-dock .reference-picker-head,.agent-dock .reference-list button,.agent-dock .reference-list p{font-size:12px}
+.agent-dock .request-panel .panel-title,.agent-dock .request-question label,.agent-dock .request-rule{font-size:12px}
+.agent-dock .request-question input{font-size:13px}
+.agent-dock .request-actions button,.agent-dock .answer-options button{min-height:34px;font-size:12px}
+.agent-dock .agent-picker-trigger{display:inline-flex;align-items:center;justify-content:space-between;gap:8px;max-width:100%;height:34px;border:0;border-radius:8px;padding:0 10px;background:#f4f6f9;color:#687b97;font-size:12px;line-height:1.25}
+.agent-dock .agent-picker-trigger:hover:not(:disabled),.agent-dock .agent-picker-trigger[aria-expanded="true"]{background:#eaf0f9;color:#536f9c}
+.agent-dock .agent-picker-trigger span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:inherit;font-size:inherit;line-height:inherit}.agent-picker-trigger svg{flex:none}
+.agent-picker-menu{position:fixed;z-index:1000;min-width:180px;max-width:calc(100vw - 16px);padding:5px;border:1px solid #dce5f0;border-radius:10px;background:#fff;box-shadow:0 10px 28px #34496624;outline:none}
+.agent-picker-menu:focus-visible{outline:2px solid #819ad3;outline-offset:2px}.agent-picker-option{display:flex;align-items:center;gap:8px;min-height:36px;border-radius:7px;padding:7px 9px;color:#455972;font-size:12px;cursor:pointer}.agent-picker-option.is-active{background:#f0f5fb}.agent-picker-option span{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.agent-picker-option small{color:#97a6b9;font-size:11px;white-space:nowrap}.agent-picker-option svg{flex:none;color:#7187bd}

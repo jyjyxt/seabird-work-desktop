@@ -2,7 +2,7 @@
 use crate::{find_agent, setup};
 use serde_json::{json, Value};
 
-const HELP: &str = "Seabird 本地工作台 CLI\n\n下方 seabird 表示 Seabird 可执行文件路径；程序未加入 PATH 时请使用完整路径。\n\n用法：\n  seabird --help\n  seabird version [--json]\n  seabird status [--json]\n  seabird workspace get [--json]\n  seabird workspace set --path <目录> [--json]\n  seabird agent list [--json]\n  seabird mcp info --workspace <目录> [--json]\n  seabird mcp status <codex|claude> --workspace <目录> [--json]\n  seabird mcp install <codex|claude> --workspace <目录> [--dry-run] [--json]\n  seabird mcp remove <codex|claude> [--json]\n  seabird mcp serve --workspace <目录>\n\nMCP 连接绑定指定目录，可读取、创建和覆盖该目录中的文本文件。配置后请在新 Agent 会话中验证。";
+const HELP: &str = "Seabird 本地工作台 CLI\n\n下方 seabird 表示 Seabird 可执行文件路径；程序未加入 PATH 时请使用完整路径。\n\n用法：\n  seabird --help\n  seabird version [--json]\n  seabird status [--json]\n  seabird workspace get [--json]\n  seabird workspace set --path <目录> [--json]\n  seabird agent list [--json]\n  seabird content list --workspace <目录> [--json]\n  seabird content save-material --workspace <目录> --input <JSON文件> [--json]\n  seabird content import-media --workspace <目录> --path <图片或视频> [--json]\n  seabird content save-article --workspace <目录> --input <JSON文件> [--json]\n  seabird mcp info --workspace <目录> [--json]\n  seabird mcp status <codex|claude> --workspace <目录> [--json]\n  seabird mcp install <codex|claude> --workspace <目录> [--dry-run] [--json]\n  seabird mcp remove <codex|claude> [--json]\n  seabird mcp serve --workspace <目录>\n\n内容写入 JSON 格式为 {\"item\":完整对象,\"expected\":原始对象}；新增时 item.id 为 0 且 expected 为 null，修改时 expected 必须是 list 返回的原始对象。素材字段：id,title,source,url,note,tags,media,updated_at；文章字段：id,title,body,versions,material_ids,updated_at。versions 如 {\"wechat\":{\"title\":\"标题\",\"body\":\"正文\"}}，无附件用 []，无版本用 {}，新内容 updated_at 用空字符串。写入后返回 id 和 backup_warning。导入图片或视频时先运行 content import-media，将返回的附件对象加入素材的 media 后保存；导入会复制文件。\n\nMCP 连接绑定指定目录，可读取、创建和覆盖该目录中的文本文件。配置后请在新 Agent 会话中验证。";
 
 fn option(args: &[String], name: &str) -> Result<Option<String>, String> {
     let positions: Vec<_> = args
@@ -119,6 +119,42 @@ fn response(args: &[String]) -> Result<(Value, bool), String> {
                 })
                 .collect();
             Ok((json!({"schema_version":1,"agents":agents}), true))
+        }
+        ("content", "import-media") => {
+            validate_options(&args[2..], &["--workspace", "--path"], &["--json"])?;
+            let workspace = root(&args[2..])?;
+            let path = option(&args[2..], "--path")?.ok_or("请使用 --path 指定文件")?;
+            let media = crate::content::cli_import_media(&workspace, &path)?;
+            Ok((
+                serde_json::to_value(media).map_err(|e| e.to_string())?,
+                true,
+            ))
+        }
+        ("content", "list" | "save-material" | "save-article") => {
+            validate_options(
+                &args[2..],
+                if second == "list" {
+                    &["--workspace"]
+                } else {
+                    &["--workspace", "--input"]
+                },
+                &["--json"],
+            )?;
+            let workspace = root(&args[2..])?;
+            let input = if second == "list" {
+                None
+            } else {
+                let path = option(&args[2..], "--input")?.ok_or("请使用 --input 指定 JSON 文件")?;
+                let bytes = std::fs::read(path).map_err(|e| format!("无法读取 JSON 文件：{e}"))?;
+                if bytes.len() > 8_000_000 {
+                    return Err("输入文件过大".into());
+                }
+                Some(serde_json::from_slice(&bytes).map_err(|e| format!("JSON 格式错误：{e}"))?)
+            };
+            Ok((
+                crate::content::cli_content(&workspace, second, input)?,
+                true,
+            ))
         }
         ("mcp", "info") => {
             validate_options(&args[2..], &["--workspace"], &["--json"])?;

@@ -423,6 +423,62 @@ pub fn remove_bridge(id: &str, agent: &str) -> Result<(), String> {
     }
     mark_removed(id)
 }
+pub fn inspect(root: &str) -> Result<SetupReport, String> {
+    let root = crate::workspace::root(root)?.to_string_lossy().into_owned();
+    let binary = std::env::current_exe()
+        .map_err(|e| e.to_string())?
+        .to_string_lossy()
+        .into_owned();
+    inspect_with(root, &binary, crate::find_agent)
+}
+
+fn inspect_with<F: Fn(&str) -> Option<String>>(
+    root: String,
+    binary: &str,
+    discover: F,
+) -> Result<SetupReport, String> {
+    let handshake = verify_bridge(binary, &root);
+    let agents = ["codex", "claude"]
+        .iter()
+        .map(|id| {
+            let Some(path) = discover(id) else {
+                return AgentSetup {
+                    id: (*id).into(),
+                    path: None,
+                    version: None,
+                    auth: "unknown".into(),
+                    bridge: "not_installed".into(),
+                    detail: "未检测到安装".into(),
+                };
+            };
+            let version = run_command(&path, &["--version"], Duration::from_secs(8))
+                .ok()
+                .filter(|o| o.status.success())
+                .and_then(|o| {
+                    String::from_utf8_lossy(&o.stdout)
+                        .lines()
+                        .next()
+                        .map(|s| s.chars().take(160).collect())
+                });
+            let auth = auth_status(id, &path);
+            let (bridge, detail) = check_bridge(id, &path, binary, &root, false);
+            let detail = match &handshake {
+                Ok(()) => format!("{detail}；本地 MCP 服务握手正常，客户端调用尚未验证"),
+                Err(e) => format!("{detail}；本地 MCP 服务握手失败：{e}"),
+            };
+            AgentSetup {
+                id: (*id).into(),
+                path: Some(path),
+                version,
+                auth,
+                bridge,
+                detail,
+            }
+        })
+        .collect();
+    Ok(report(root, agents))
+}
+
 fn configure_agent(id: &str, agent: Option<String>, binary: &str, root: &str) -> AgentSetup {
     let Some(path) = agent else {
         return AgentSetup {
@@ -509,9 +565,11 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn tempdir() -> PathBuf {
+        static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let path = std::env::temp_dir().join(format!(
-            "seabird-setup-test-{}-{}",
+            "seabird-setup-test-{}-{}-{}",
             std::process::id(),
+            NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
@@ -583,6 +641,34 @@ mod tests {
         .unwrap();
         assert_eq!(bridge_status("codex", agent, binary, &root).0, "conflict");
         assert_eq!(fs::read_to_string(&count).unwrap().lines().count(), 1);
+        fs::remove_dir_all(dir).unwrap();
+    }
+    #[cfg(unix)]
+    #[test]
+    fn inspection_reports_status_without_registering() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempdir();
+        let bridge = dir.join("seabird");
+        let agent = dir.join("codex");
+        let writes = dir.join("writes");
+        fs::write(&bridge, "#!/bin/sh\nread line\necho '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"serverInfo\":{\"name\":\"seabird\"}}}'\n").unwrap();
+        let script = format!("#!/bin/sh\ncase \"$1 $2\" in\n '--version ') echo 'codex 1';;\n 'login status') exit 0;;\n 'mcp get') echo \"No MCP server named 'seabird' found\" >&2; exit 1;;\n 'mcp add') touch '{}';;\n *) exit 2;;\nesac\n", writes.display());
+        fs::write(&agent, script).unwrap();
+        for path in [&bridge, &agent] {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let path = agent.to_string_lossy().into_owned();
+        let report = inspect_with(
+            dir.to_string_lossy().into_owned(),
+            bridge.to_str().unwrap(),
+            |id| (id == "codex").then(|| path.clone()),
+        )
+        .unwrap();
+        assert_eq!(report.agents[0].auth, "configured");
+        assert_eq!(report.agents[0].bridge, "not_connected");
+        assert!(report.agents[0].detail.contains("客户端调用尚未验证"));
+        assert_eq!(report.agents[1].bridge, "not_installed");
+        assert!(!writes.exists());
         fs::remove_dir_all(dir).unwrap();
     }
     #[test]

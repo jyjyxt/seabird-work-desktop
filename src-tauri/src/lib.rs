@@ -62,6 +62,13 @@ async fn setup_agents(root: String) -> Result<setup::SetupReport, String> {
 }
 
 #[tauri::command]
+async fn inspect_agents(root: String) -> Result<setup::SetupReport, String> {
+    tauri::async_runtime::spawn_blocking(move || setup::inspect(&root))
+        .await
+        .map_err(|e| format!("检查失败：{e}"))?
+}
+
+#[tauri::command]
 fn saved_setup_report() -> Result<Option<setup::SetupReport>, String> {
     setup::saved_report()
 }
@@ -69,6 +76,14 @@ fn saved_setup_report() -> Result<Option<setup::SetupReport>, String> {
 #[tauri::command]
 fn saved_workspace() -> Result<Option<String>, String> {
     setup::saved_workspace()
+}
+
+#[tauri::command]
+fn executable_path() -> Result<String, String> {
+    Ok(std::env::current_exe()
+        .map_err(|e| e.to_string())?
+        .to_string_lossy()
+        .into_owned())
 }
 
 #[tauri::command]
@@ -532,6 +547,9 @@ fn launch_agent(root: String, id: String) -> Result<(), String> {
 }
 fn database(app: &tauri::AppHandle) -> Result<Connection, String> {
     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    database_at(&dir)
+}
+fn database_at(dir: &std::path::Path) -> Result<Connection, String> {
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let path = dir.join("workbench.sqlite3");
     #[cfg(unix)]
@@ -558,7 +576,7 @@ fn database(app: &tauri::AppHandle) -> Result<Connection, String> {
         .join("com.seabird.workbench-backups")
         .join("workbench-latest.sqlite3");
     if !latest.exists() {
-        if let Err(error) = backup_database(app, &conn, false, false) {
+        if let Err(error) = backup::database(&conn, dir, false, false) {
             eprintln!("本地数据库备份失败：{error}");
         }
     }
@@ -747,10 +765,12 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             default_workspace,
             setup_agents,
+            inspect_agents,
             remember_workspace,
             saved_workspace,
             saved_setup_report,
             setup_command,
+            executable_path,
             list_files,
             read_file,
             write_file,

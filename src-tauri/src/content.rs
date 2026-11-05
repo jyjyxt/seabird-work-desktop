@@ -4,14 +4,14 @@ use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, time::Duration};
 use tauri::Manager;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MediaFile {
     pub path: String,
     pub name: String,
     pub kind: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Material {
     pub id: i64,
     pub title: String,
@@ -23,12 +23,12 @@ pub struct Material {
     pub media: Vec<MediaFile>,
     pub updated_at: String,
 }
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Version {
     pub title: String,
     pub body: String,
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Article {
     pub id: i64,
     pub title: String,
@@ -127,7 +127,16 @@ fn load(conn: &Connection, root: &str) -> Result<ContentData, String> {
         articles,
     })
 }
+#[cfg(test)]
 fn save_material(conn: &mut Connection, root: &str, item: &Material) -> Result<i64, String> {
+    save_material_checked(conn, root, item, None)
+}
+fn save_material_checked(
+    conn: &mut Connection,
+    root: &str,
+    item: &Material,
+    expected: Option<&Material>,
+) -> Result<i64, String> {
     init(conn)?;
     if item.title.trim().is_empty() {
         return Err("请输入素材标题".into());
@@ -143,7 +152,16 @@ fn save_material(conn: &mut Connection, root: &str, item: &Material) -> Result<i
     if item.media.len() > 100 {
         return Err("素材附件过多".into());
     }
-    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| e.to_string())?;
+    if let Some(expected) = expected {
+        if expected.id != item.id
+            || load(&tx, root)?.materials.iter().find(|v| v.id == item.id) != Some(expected)
+        {
+            return Err("素材已被修改，请重新读取后再保存".into());
+        }
+    }
     let id = if item.id == 0 {
         tx.execute("INSERT INTO content_materials(root,title,source,url,note,tags) VALUES (?1,?2,?3,?4,?5,?6)",params![root,item.title.trim(),item.source,item.url,item.note,item.tags]).map_err(|e|e.to_string())?;
         tx.last_insert_rowid()
@@ -177,7 +195,16 @@ fn save_material(conn: &mut Connection, root: &str, item: &Material) -> Result<i
     tx.commit().map_err(|e| e.to_string())?;
     Ok(id)
 }
+#[cfg(test)]
 fn save_article(conn: &mut Connection, root: &str, item: &Article) -> Result<i64, String> {
+    save_article_checked(conn, root, item, None)
+}
+fn save_article_checked(
+    conn: &mut Connection,
+    root: &str,
+    item: &Article,
+    expected: Option<&Article>,
+) -> Result<i64, String> {
     init(conn)?;
     if item.title.trim().is_empty() {
         return Err("请输入文章标题".into());
@@ -186,7 +213,16 @@ fn save_article(conn: &mut Connection, root: &str, item: &Article) -> Result<i64
     if item.title.len() > 2000 || item.body.len() > 2_000_000 || versions.len() > 4_000_000 {
         return Err("文章内容过长".into());
     }
-    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| e.to_string())?;
+    if let Some(expected) = expected {
+        if expected.id != item.id
+            || load(&tx, root)?.articles.iter().find(|v| v.id == item.id) != Some(expected)
+        {
+            return Err("文章已被修改，请重新读取后再保存".into());
+        }
+    }
     let id = if item.id == 0 {
         tx.execute(
             "INSERT INTO content_articles(root,title,body,versions) VALUES (?1,?2,?3,?4)",
@@ -264,10 +300,11 @@ pub fn content_save_material(
     app: tauri::AppHandle,
     root: String,
     item: Material,
+    expected: Option<Material>,
 ) -> Result<SaveResult, String> {
     let root = crate::workspace::root(&root)?;
     let mut conn = crate::database(&app)?;
-    let id = save_material(&mut conn, &root.to_string_lossy(), &item)?;
+    let id = save_material_checked(&mut conn, &root.to_string_lossy(), &item, expected.as_ref())?;
     let backup_warning = crate::backup_database(&app, &conn, false, false).err();
     Ok(SaveResult { id, backup_warning })
 }
@@ -330,6 +367,10 @@ fn copy_media(root: &str, path: &str) -> Result<(MediaFile, std::path::PathBuf),
         actual,
     ))
 }
+pub fn cli_import_media(root: &str, path: &str) -> Result<MediaFile, String> {
+    copy_media(root, path).map(|(media, _)| media)
+}
+
 #[tauri::command]
 pub async fn content_import_media(
     app: tauri::AppHandle,
@@ -351,10 +392,11 @@ pub fn content_save_article(
     app: tauri::AppHandle,
     root: String,
     item: Article,
+    expected: Option<Article>,
 ) -> Result<SaveResult, String> {
     let root = crate::workspace::root(&root)?;
     let mut conn = crate::database(&app)?;
-    let id = save_article(&mut conn, &root.to_string_lossy(), &item)?;
+    let id = save_article_checked(&mut conn, &root.to_string_lossy(), &item, expected.as_ref())?;
     let backup_warning = crate::backup_database(&app, &conn, false, false).err();
     Ok(SaveResult { id, backup_warning })
 }
@@ -371,6 +413,61 @@ pub fn content_delete(
         .map_err(|e| format!("无法创建删除前备份，未删除：{e}"))?;
     delete(&conn, &root.to_string_lossy(), &kind, id)?;
     Ok(crate::backup_database(&app, &conn, false, false).err())
+}
+
+pub fn cli_content(
+    root: &str,
+    operation: &str,
+    input: Option<serde_json::Value>,
+) -> Result<serde_json::Value, String> {
+    let root = crate::workspace::root(root)?.to_string_lossy().into_owned();
+    let dir = dirs::data_dir()
+        .ok_or("无法找到应用数据目录")?
+        .join("com.seabird.workbench");
+    cli_content_at(&root, operation, input, &dir)
+}
+fn cli_content_at(
+    root: &str,
+    operation: &str,
+    input: Option<serde_json::Value>,
+    dir: &std::path::Path,
+) -> Result<serde_json::Value, String> {
+    let mut conn = crate::database_at(dir)?;
+    if operation == "list" {
+        return serde_json::to_value(load(&conn, &root)?).map_err(|e| e.to_string());
+    }
+    let input = input.ok_or("缺少 JSON 输入")?;
+    let value = input.get("item").ok_or("缺少 item")?.clone();
+    let expected = input.get("expected").filter(|v| !v.is_null()).cloned();
+    let id = match operation {
+        "save-material" => {
+            let item: Material =
+                serde_json::from_value(value).map_err(|e| format!("素材格式错误：{e}"))?;
+            let before: Option<Material> = expected
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(|e| format!("原始素材格式错误：{e}"))?;
+            if item.id != 0 && before.is_none() {
+                return Err("修改素材必须提供读取时的 expected 原始对象".into());
+            }
+            save_material_checked(&mut conn, &root, &item, before.as_ref())?
+        }
+        "save-article" => {
+            let item: Article =
+                serde_json::from_value(value).map_err(|e| format!("文章格式错误：{e}"))?;
+            let before: Option<Article> = expected
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(|e| format!("原始文章格式错误：{e}"))?;
+            if item.id != 0 && before.is_none() {
+                return Err("修改文章必须提供读取时的 expected 原始对象".into());
+            }
+            save_article_checked(&mut conn, &root, &item, before.as_ref())?
+        }
+        _ => return Err("未知内容操作".into()),
+    };
+    let warning = crate::backup::database(&conn, dir, false, false).err();
+    Ok(serde_json::json!({"id":id,"backup_warning":warning}))
 }
 
 #[derive(Serialize)]
@@ -461,6 +558,83 @@ pub async fn content_trends() -> Result<TrendResult, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn agent_content_roundtrip_guards_concurrent_edits_and_preserves_links() {
+        let base = std::env::temp_dir().join(format!(
+            "seabird-agent-content-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let app = base.join("app");
+        let root = base.join("workspace");
+        std::fs::create_dir_all(&root).unwrap();
+        let workspace = root.to_str().unwrap();
+        let material = serde_json::json!({"id":0,"title":"来源","source":"网站","url":"https://example.com","note":"素材","tags":"","media":[],"updated_at":""});
+        let saved = cli_content_at(
+            workspace,
+            "save-material",
+            Some(serde_json::json!({"item":material})),
+            &app,
+        )
+        .unwrap();
+        let mid = saved["id"].as_i64().unwrap();
+        let article = serde_json::json!({"id":0,"title":"初稿","body":"正文","versions":{"wechat":{"title":"公众号","body":"原文"}},"material_ids":[mid],"updated_at":""});
+        let saved = cli_content_at(
+            workspace,
+            "save-article",
+            Some(serde_json::json!({"item":article})),
+            &app,
+        )
+        .unwrap();
+        let id = saved["id"].as_i64().unwrap();
+        let data = cli_content_at(workspace, "list", None, &app).unwrap();
+        let original = data["articles"][0].clone();
+        assert_eq!(original["material_ids"], serde_json::json!([mid]));
+        let mut updated = original.clone();
+        updated["body"] = serde_json::json!("修改后");
+        assert!(cli_content_at(
+            workspace,
+            "save-article",
+            Some(serde_json::json!({"item":updated})),
+            &app
+        )
+        .is_err());
+        cli_content_at(
+            workspace,
+            "save-article",
+            Some(serde_json::json!({"item":updated,"expected":original})),
+            &app,
+        )
+        .unwrap();
+        let mut stale = original.clone();
+        stale["title"] = serde_json::json!("旧修改");
+        assert!(cli_content_at(
+            workspace,
+            "save-article",
+            Some(serde_json::json!({"item":stale,"expected":original})),
+            &app
+        )
+        .is_err());
+        let result = cli_content_at(workspace, "list", None, &app).unwrap();
+        assert_eq!(result["articles"][0]["id"], id);
+        assert_eq!(result["articles"][0]["body"], "修改后");
+        assert_eq!(result["articles"][0]["versions"]["wechat"]["body"], "原文");
+        assert_eq!(
+            result["articles"][0]["material_ids"],
+            serde_json::json!([mid])
+        );
+        let other = base.join("other");
+        std::fs::create_dir_all(&other).unwrap();
+        let other_result = cli_content_at(other.to_str().unwrap(), "list", None, &app).unwrap();
+        assert_eq!(other_result["articles"].as_array().unwrap().len(), 0);
+        assert!(base
+            .join("com.seabird.workbench-backups/workbench-latest.sqlite3")
+            .is_file());
+        std::fs::remove_dir_all(base).unwrap();
+    }
     #[test]
     fn imported_media_is_copied_and_original_is_preserved() {
         let base = std::env::temp_dir().join(format!(

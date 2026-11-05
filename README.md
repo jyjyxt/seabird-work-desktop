@@ -10,16 +10,16 @@
 
 - 首次启动时自动创建并使用系统文稿目录下的 `seabird` 文件夹（macOS 通常为 `~/Documents/seabird`）作为本地素材目录。可在「设置与文件」中切换目录；素材和文章按目录区分。快捷键：`⌘/Ctrl + S` 保存当前素材、文章或文件，`⌘/Ctrl + 1/2/3` 切换工作台、素材和文章。
 - 在「素材」中保存标题、来源、链接、标签和备注，也可导入图片或视频。导入的文件复制到素材目录下的 `seabird-media`，素材卡片和详情可预览图片或播放受系统支持的视频格式。删除素材或移除附件不会删除本地文件。支持 PNG、JPEG、GIF、WebP、AVIF、MP4、MOV、M4V 和 WebM，单文件最多 1 GB；实际播放取决于系统编解码器。
-- 在「文章」中管理原稿、关联素材及 X、公众号、小红书的独立草稿版本，也可将文章和素材交给本机 Agent 协助构思。平台发布尚未接入，平台版本可复制后手动使用。
+- 在「素材」和「文章」中管理内容，并可在当前页面与本机 Agent 协作。文章支持原稿、关联素材及 X、公众号、小红书的独立草稿版本。平台发布尚未接入，平台版本可复制后手动使用。
 - 在「热点发现」可通过本机已安装的 `cloudl` 读取当前登录 X 账号的热门话题并收藏为素材。需要先完成 cloudl 浏览器连接和 X 登录；热点可能因账号和地区不同而变化。
-- 在「Agent」页面点击「复制配置任务」，交给外部 Codex 或 Claude Code 检查和配置自己的 MCP 连接。也可以点击「一键连接」注册全部已安装的 Agent。已有的不同 `seabird` MCP 配置不会被覆盖；出现冲突时请检查旧连接。首次配置后请在新的 Agent 会话中验证。
-- 检测本机 `codex` 和 `claude` 命令。在「Agent」页面直接对话，实时查看回答和工具活动；Agent 请求操作权限或提问时，可在页面中回复。对话记录保存在应用的 SQLite 数据库中，按工作目录查看；重新打开应用后可选择历史对话继续，实际上下文由对应 Agent 的原生会话恢复。需要先安装并登录对应 CLI，且原生会话记录仍然存在。
-- 在「Agent」页面可以将 Seabird 注册为 Codex 或 Claude Code 的用户级 MCP 服务。新会话可通过本地标准输入输出连接，在注册时选择的工作目录中列出、读取、创建和覆盖文本文件。连接不会开放网络端口；MCP 客户端可以修改该目录中的文件。切换工作目录或移动应用后，需先移除旧连接再重新注册。
+- 在「设置与文件 → 本地 Agent → 外部 Agent 连接」点击「复制配置任务」，交给外部 Codex 或 Claude Code 检查和配置自己的 MCP 连接。也可以点击「一键连接」注册全部已安装的 Agent。已有的不同 `seabird` MCP 配置不会被覆盖；出现冲突时请检查旧连接。首次配置后请在新的 Agent 会话中验证。
+- 检测本机 `codex` 和 `claude` 命令。在当前内容页面打开 Agent 对话，实时查看回答和工具活动；Agent 请求操作权限或提问时，可在页面中回复。对话记录保存在应用的 SQLite 数据库中，按工作目录查看；重新打开应用后可选择历史对话继续，实际上下文由对应 Agent 的原生会话恢复。需要先安装并登录对应 CLI，且原生会话记录仍然存在。
+- 在「设置与文件 → 本地 Agent」可以将 Seabird 注册为 Codex 或 Claude Code 的用户级 MCP 服务。新会话可通过本地标准输入输出连接，在注册时选择的工作目录中列出、读取、创建和覆盖文本文件。连接不会开放网络端口；MCP 客户端可以修改该目录中的文件。切换工作目录或移动应用后，需先移除旧连接再重新注册。
 - 内置 SQLite 数据库和 SQL 控制台，首次使用时创建 `notes` 表。每次执行一条 SQL，查询结果最多显示 500 行。数据库文件位于应用数据目录中的 `workbench.sqlite3`，其完整路径会显示在数据库页面。
 
 ## 外部 Agent 接入
 
-打开 Seabird 的「Agent」页面，选择工作目录并点击「复制配置任务」，将任务粘贴给本机 Codex 或 Claude Code。配置成功后开启新会话，请 Agent 调用 `workspace_info` 验证；单纯注册成功或 MCP 初始化成功并不代表客户端已实际调用成功。
+打开 Seabird 的「设置与文件 → 本地 Agent → 外部 Agent 连接」，选择工作目录并点击「复制配置任务」，将任务粘贴给本机 Codex 或 Claude Code。配置成功后开启新会话，请 Agent 调用 `workspace_info` 验证；单纯注册成功或 MCP 初始化成功并不代表客户端已实际调用成功。
 
 Seabird 桌面可执行文件也提供 CLI；页面中的复制命令包含当前安装的实际路径。在终端或交给 Agent 使用时，将下面的 `SEABIRD` 替换为该可执行文件的完整路径（路径含空格时保留引号）。不要求该程序已加入 PATH：
 
@@ -29,6 +29,7 @@ Seabird 桌面可执行文件也提供 CLI；页面中的复制命令包含当�
 "SEABIRD" workspace get --json
 "SEABIRD" workspace set --path "/path/to/workspace" --json
 "SEABIRD" agent list --json
+"SEABIRD" content list --workspace "/path/to/workspace" --json
 "SEABIRD" mcp info --workspace "/path/to/workspace" --json
 "SEABIRD" mcp status codex --workspace "/path/to/workspace" --json
 "SEABIRD" mcp install codex --workspace "/path/to/workspace" --dry-run --json
@@ -38,7 +39,7 @@ Seabird 桌面可执行文件也提供 CLI；页面中的复制命令包含当�
 
 将 `codex` 换成 `claude` 可配置 Claude Code。安装仅修改指定 Agent；预览和状态检查不写入其配置。命令输出 JSON，失败返回非零退出状态。`workspace set` 更新下次启动的默认目录，不会切换已打开的窗口或已注册的 MCP。登录状态来自各自 CLI 的探测，认证是否有效仍需实际发起请求验证。
 
-标准 MCP 客户端可通过 `mcp info` 获取 stdio 的 `command` 和 `args`。Seabird MCP 提供工作目录信息和文件列出、读取、创建、覆盖操作；当前不提供数据库操作。随仓库提供的 [Seabird Skill](skills/seabird/SKILL.md) 可帮助支持 Skills 的 Agent 发现 CLI；不安装 Skill 也可使用命令和 MCP。
+标准 MCP 客户端可通过 `mcp info` 获取 stdio 的 `command` 和 `args`。Seabird MCP 提供工作目录信息和文件列出、读取、创建、覆盖操作。Agent 可通过 CLI 的 `content list`、`content save-material`、`content import-media` 和 `content save-article` 读写当前工作目录的素材和文章；具体参数和 JSON 格式见 `--help`。修改已有内容时须提供读取到的原始对象，以检测并发修改；保存后会更新数据库备份。MCP 本身不提供数据库操作。随仓库提供的 [Seabird Skill](skills/seabird/SKILL.md) 可帮助支持 Skills 的 Agent 发现 CLI；不安装 Skill 也可使用命令和 MCP。
 
 旧的 `--setup [--workspace <目录>]` 和 `--mcp <目录>` 仍可用。`--setup` 检查本地 MCP 握手并配置全部已安装的 Codex 和 Claude Code，出现未登录、配置冲突或检查失败时返回非零退出状态。
 

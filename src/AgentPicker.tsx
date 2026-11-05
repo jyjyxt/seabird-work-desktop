@@ -1,3 +1,4 @@
+import { useI18n } from './i18n';
 import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Check, ChevronDown } from 'lucide-react';
@@ -7,6 +8,7 @@ type Option = { id: string; name: string; installed: boolean };
 type Props = { value: string; options: Option[]; disabled: boolean; onChange: (id: string) => void };
 
 export default function AgentPicker({ value, options, disabled, onChange }: Props) {
+  const { t } = useI18n();
   const [open, setOpen] = useState(false);
   const [active, setActive] = useState(value);
   const [position, setPosition] = useState({ left: 0, top: 0 });
@@ -58,7 +60,7 @@ export default function AgentPicker({ value, options, disabled, onChange }: Prop
     else setActive(options[action.index].id);
   };
   return <div className="agent-select agent-picker">
-    <button ref={trigger} type="button" className="agent-picker-trigger" role="combobox" aria-label={`选择 Agent，当前为 ${chosen?.name || value}`} aria-haspopup="listbox" aria-expanded={open} aria-controls={open ? listId : undefined} aria-activedescendant={open ? `${listId}-${active}` : undefined} disabled={disabled} onClick={() => open ? close() : show()} onKeyDown={event => { if (open && event.key === 'Tab') { close(); return; } if (open) onMenuKey(event); else if (event.key === 'ArrowDown' || event.key === 'ArrowUp') { event.preventDefault(); show(); } }}><span>{chosen?.name || value}</span><ChevronDown size={14} aria-hidden="true"/></button>
-    {open && createPortal(<div id={listId} ref={menu} className="agent-picker-menu" role="listbox" aria-label="选择 Agent" style={position}>{options.map(option => <div key={option.id} id={`${listId}-${option.id}`} className={`agent-picker-option${option.id === active ? ' is-active' : ''}`} role="option" aria-selected={option.id === value} onMouseMove={() => setActive(option.id)} onMouseDown={event => event.preventDefault()} onClick={() => select(option.id)}><span>{option.name}</span>{!option.installed && <small>未检测到</small>}{option.id === value && <Check size={15} aria-hidden="true"/>}</div>)}</div>, document.body)}
+    <button ref={trigger} type="button" className="agent-picker-trigger" role="combobox" aria-label={t("选择 Agent，当前为 {0}", chosen?.name || value)} aria-haspopup="listbox" aria-expanded={open} aria-controls={open ? listId : undefined} aria-activedescendant={open ? `${listId}-${active}` : undefined} disabled={disabled} onClick={() => open ? close() : show()} onKeyDown={event => { if (open && event.key === 'Tab') { close(); return; } if (open) onMenuKey(event); else if (event.key === 'ArrowDown' || event.key === 'ArrowUp') { event.preventDefault(); show(); } }}><span>{chosen?.name || value}</span><ChevronDown size={14} aria-hidden="true"/></button>
+    {open && createPortal(<div id={listId} ref={menu} className="agent-picker-menu" role="listbox" aria-label={t("选择 Agent")} style={position}>{options.map(option => <div key={option.id} id={`${listId}-${option.id}`} className={`agent-picker-option${option.id === active ? ' is-active' : ''}`} role="option" aria-selected={option.id === value} onMouseMove={() => setActive(option.id)} onMouseDown={event => event.preventDefault()} onClick={() => select(option.id)}><span>{option.name}</span>{!option.installed && <small>{t("未检测到")}</small>}{option.id === value && <Check size={15} aria-hidden="true"/>}</div>)}</div>, document.body)}
   </div>;
 }

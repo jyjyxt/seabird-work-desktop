@@ -104,6 +104,9 @@ pub struct Publication {
 
 fn init(conn: &Connection) -> Result<(), String> {
     conn.execute_batch("PRAGMA foreign_keys = ON;
+        CREATE TABLE IF NOT EXISTS social_platform_metadata (key TEXT PRIMARY KEY);
+        CREATE TABLE IF NOT EXISTS social_platforms (id INTEGER PRIMARY KEY, name TEXT NOT NULL, image_url TEXT NOT NULL, url TEXT NOT NULL, types TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS social_platform_disabled (platform_id INTEGER PRIMARY KEY REFERENCES social_platforms(id) ON DELETE CASCADE);
         CREATE TABLE IF NOT EXISTS content_materials (id INTEGER PRIMARY KEY, root TEXT NOT NULL, title TEXT NOT NULL, source TEXT NOT NULL DEFAULT '', url TEXT NOT NULL DEFAULT '', note TEXT NOT NULL DEFAULT '', tags TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
         CREATE INDEX IF NOT EXISTS content_materials_root ON content_materials(root);
         CREATE TABLE IF NOT EXISTS content_material_media (material_id INTEGER NOT NULL REFERENCES content_materials(id) ON DELETE CASCADE, path TEXT NOT NULL, name TEXT NOT NULL, kind TEXT NOT NULL, PRIMARY KEY(material_id,path));
@@ -438,6 +441,377 @@ fn save_article_with_key(
     tx.commit().map_err(|e| e.to_string())?;
     Ok(id)
 }
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SocialPlatform {
+    id: i64,
+    name: String,
+    image_url: String,
+    url: String,
+    types: Vec<String>,
+    #[serde(default = "platform_enabled_by_default")]
+    enabled: bool,
+}
+
+fn platform_enabled_by_default() -> bool {
+    true
+}
+
+fn load_platforms(conn: &Connection) -> Result<Vec<SocialPlatform>, String> {
+    init(conn)?;
+    let mut stmt = conn.prepare("SELECT id,name,image_url,url,types,NOT EXISTS(SELECT 1 FROM social_platform_disabled WHERE platform_id=social_platforms.id) FROM social_platforms ORDER BY name COLLATE NOCASE,id").map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, bool>(5)?,
+            ))
+        })
+        .map_err(|e| e.to_string())?;
+    rows.map(|row| {
+        let (id, name, image_url, url, types, enabled) = row.map_err(|e| e.to_string())?;
+        Ok(SocialPlatform {
+            id,
+            name,
+            image_url,
+            url,
+            types: serde_json::from_str(&types).map_err(|e| format!("平台类型读取失败：{e}"))?,
+            enabled,
+        })
+    })
+    .collect()
+}
+
+fn save_platform(conn: &Connection, item: &SocialPlatform) -> Result<i64, String> {
+    init(conn)?;
+    let name = item.name.trim();
+    if item.id < 0 || name.is_empty() || name.len() > 200 {
+        return Err("请输入有效的平台名称".into());
+    }
+    let image_url = source_url(&item.image_url)?.to_string();
+    let url = source_url(&item.url)?.to_string();
+    if item.types.is_empty()
+        || item
+            .types
+            .iter()
+            .any(|t| !["article", "image", "video"].contains(&t.as_str()))
+    {
+        return Err("请选择适用类型".into());
+    }
+    let types = serde_json::to_string(&item.types).map_err(|e| e.to_string())?;
+    if item.id == 0 {
+        conn.execute(
+            "INSERT INTO social_platforms(name,image_url,url,types) VALUES(?1,?2,?3,?4)",
+            params![name, image_url, url, types],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(conn.last_insert_rowid())
+    } else {
+        if conn
+            .execute(
+                "UPDATE social_platforms SET name=?1,image_url=?2,url=?3,types=?4 WHERE id=?5",
+                params![name, image_url, url, types, item.id],
+            )
+            .map_err(|e| e.to_string())?
+            == 0
+        {
+            return Err("平台不存在，请重新打开".into());
+        }
+        Ok(item.id)
+    }
+}
+
+fn seed_social_platforms(conn: &Connection) -> Result<(), String> {
+    init(conn)?;
+    let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| e.to_string())?;
+    let initialized = tx
+        .query_row(
+            "SELECT 1 FROM social_platform_metadata WHERE key='defaults_v1'",
+            [],
+            |_| Ok(()),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?
+        .is_some();
+    if !initialized {
+        for (name, image, url, types) in [
+            (
+                "微信公众号",
+                "https://mp.weixin.qq.com/favicon.ico",
+                "https://mp.weixin.qq.com/",
+                r#"["article"]"#,
+            ),
+            (
+                "知乎",
+                "https://www.zhihu.com/favicon.ico",
+                "https://zhuanlan.zhihu.com/write",
+                r#"["article"]"#,
+            ),
+            (
+                "小红书",
+                "https://www.xiaohongshu.com/favicon.ico",
+                "https://creator.xiaohongshu.com/",
+                r#"["article","image","video"]"#,
+            ),
+            (
+                "今日头条",
+                "https://www.toutiao.com/favicon.ico",
+                "https://mp.toutiao.com/",
+                r#"["article","image","video"]"#,
+            ),
+        ] {
+            tx.execute("INSERT INTO social_platforms(name,image_url,url,types) SELECT ?1,?2,?3,?4 WHERE NOT EXISTS (SELECT 1 FROM social_platforms WHERE name=?1 OR url=?3)", params![name, image, url, types]).map_err(|e| e.to_string())?;
+        }
+        tx.execute(
+            "INSERT INTO social_platform_metadata(key) VALUES('defaults_v1')",
+            [],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    let international_initialized = tx
+        .query_row(
+            "SELECT 1 FROM social_platform_metadata WHERE key='defaults_v2'",
+            [],
+            |_| Ok(()),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?
+        .is_some();
+    if !international_initialized {
+        for (name, image, url, types) in [
+            (
+                "X",
+                "https://x.com/favicon.ico",
+                "https://x.com/compose/post",
+                r#"["article","image","video"]"#,
+            ),
+            (
+                "Instagram",
+                "https://www.instagram.com/favicon.ico",
+                "https://www.instagram.com/",
+                r#"["article","image","video"]"#,
+            ),
+            (
+                "YouTube",
+                "https://www.youtube.com/favicon.ico",
+                "https://studio.youtube.com/",
+                r#"["article","image","video"]"#,
+            ),
+            (
+                "Reddit",
+                "https://www.reddit.com/favicon.ico",
+                "https://www.reddit.com/submit",
+                r#"["article","image","video"]"#,
+            ),
+            (
+                "LinkedIn",
+                "https://www.linkedin.com/favicon.ico",
+                "https://www.linkedin.com/feed/",
+                r#"["article","image","video"]"#,
+            ),
+            (
+                "Facebook",
+                "https://www.facebook.com/favicon.ico",
+                "https://www.facebook.com/",
+                r#"["article","image","video"]"#,
+            ),
+            (
+                "TikTok",
+                "https://www.tiktok.com/favicon.ico",
+                "https://www.tiktok.com/upload",
+                r#"["article","image","video"]"#,
+            ),
+            (
+                "Threads",
+                "https://www.threads.com/favicon.ico",
+                "https://www.threads.com/",
+                r#"["article","image","video"]"#,
+            ),
+            (
+                "微博",
+                "https://weibo.com/favicon.ico",
+                "https://weibo.com/",
+                r#"["article","image","video"]"#,
+            ),
+            (
+                "哔哩哔哩",
+                "https://www.bilibili.com/favicon.ico",
+                "https://member.bilibili.com/",
+                r#"["article","image","video"]"#,
+            ),
+            (
+                "抖音",
+                "https://www.douyin.com/favicon.ico",
+                "https://creator.douyin.com/",
+                r#"["article","image","video"]"#,
+            ),
+            (
+                "Medium",
+                "https://medium.com/favicon.ico",
+                "https://medium.com/new-story",
+                r#"["article","image","video"]"#,
+            ),
+            (
+                "Telegram",
+                "https://telegram.org/favicon.ico",
+                "https://web.telegram.org/",
+                r#"["article","image","video"]"#,
+            ),
+        ] {
+            tx.execute("INSERT INTO social_platforms(name,image_url,url,types) SELECT ?1,?2,?3,?4 WHERE NOT EXISTS (SELECT 1 FROM social_platforms WHERE name=?1 OR url=?3)", params![name, image, url, types]).map_err(|e| e.to_string())?;
+        }
+        tx.execute(
+            "INSERT INTO social_platform_metadata(key) VALUES('defaults_v2')",
+            [],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    let selection_initialized = tx
+        .query_row(
+            "SELECT 1 FROM social_platform_metadata WHERE key='platform_selection_v1'",
+            [],
+            |_| Ok(()),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?
+        .is_some();
+    if !selection_initialized {
+        for (name, url) in [
+            ("今日头条", "https://mp.toutiao.com/"),
+            ("Instagram", "https://www.instagram.com/"),
+            ("Reddit", "https://www.reddit.com/submit"),
+            ("LinkedIn", "https://www.linkedin.com/feed/"),
+            ("Facebook", "https://www.facebook.com/"),
+            ("TikTok", "https://www.tiktok.com/upload"),
+            ("Threads", "https://www.threads.com/"),
+            ("微博", "https://weibo.com/"),
+            ("哔哩哔哩", "https://member.bilibili.com/"),
+            ("抖音", "https://creator.douyin.com/"),
+            ("Medium", "https://medium.com/new-story"),
+            ("Telegram", "https://web.telegram.org/"),
+        ] {
+            tx.execute("INSERT OR IGNORE INTO social_platform_disabled(platform_id) SELECT id FROM social_platforms WHERE name=?1 AND url=?2", params![name, url]).map_err(|e| e.to_string())?;
+        }
+        tx.execute(
+            "INSERT INTO social_platform_metadata(key) VALUES('platform_selection_v1')",
+            [],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    tx.commit().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn social_platform_list(app: tauri::AppHandle) -> Result<Vec<SocialPlatform>, String> {
+    let conn = crate::database(&app)?;
+    seed_social_platforms(&conn)?;
+    load_platforms(&conn)
+}
+
+#[tauri::command]
+pub fn social_platform_save(
+    app: tauri::AppHandle,
+    item: SocialPlatform,
+) -> Result<SaveResult, String> {
+    let conn = crate::database(&app)?;
+    let id = save_platform(&conn, &item)?;
+    Ok(SaveResult {
+        id,
+        backup_warning: crate::backup_database(&app, &conn, false, false).err(),
+    })
+}
+
+fn set_platform_enabled(conn: &Connection, id: i64, enabled: bool) -> Result<(), String> {
+    init(conn)?;
+    change_platform_enabled(conn, id, enabled)
+}
+
+fn change_platform_enabled(conn: &Connection, id: i64, enabled: bool) -> Result<(), String> {
+    if enabled {
+        let exists = conn
+            .query_row("SELECT 1 FROM social_platforms WHERE id=?1", [id], |_| {
+                Ok(())
+            })
+            .optional()
+            .map_err(|e| e.to_string())?
+            .is_some();
+        if !exists {
+            return Err("平台不存在".into());
+        }
+        conn.execute(
+            "DELETE FROM social_platform_disabled WHERE platform_id=?1",
+            [id],
+        )
+        .map_err(|e| e.to_string())?;
+    } else {
+        let changed = conn.execute("INSERT OR IGNORE INTO social_platform_disabled(platform_id) SELECT id FROM social_platforms WHERE id=?1", [id]).map_err(|e| e.to_string())?;
+        if changed == 0
+            && !conn
+                .query_row("SELECT 1 FROM social_platforms WHERE id=?1", [id], |_| {
+                    Ok(())
+                })
+                .optional()
+                .map_err(|e| e.to_string())?
+                .is_some()
+        {
+            return Err("平台不存在".into());
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn social_platform_set_enabled(
+    app: tauri::AppHandle,
+    id: i64,
+    enabled: bool,
+) -> Result<Option<String>, String> {
+    let conn = crate::database(&app)?;
+    set_platform_enabled(&conn, id, enabled)?;
+    Ok(crate::backup_database(&app, &conn, false, false).err())
+}
+
+fn set_platforms_enabled(conn: &Connection, ids: &[i64], enabled: bool) -> Result<(), String> {
+    init(conn)?;
+    let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| e.to_string())?;
+    for id in ids {
+        change_platform_enabled(&tx, *id, enabled)?;
+    }
+    tx.commit().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn social_platforms_set_enabled(
+    app: tauri::AppHandle,
+    ids: Vec<i64>,
+    enabled: bool,
+) -> Result<Option<String>, String> {
+    let conn = crate::database(&app)?;
+    set_platforms_enabled(&conn, &ids, enabled)?;
+    Ok(crate::backup_database(&app, &conn, false, false).err())
+}
+
+#[tauri::command]
+pub fn social_platform_delete(app: tauri::AppHandle, id: i64) -> Result<Option<String>, String> {
+    let conn = crate::database(&app)?;
+    init(&conn)?;
+    crate::backup_database(&app, &conn, false, true)
+        .map_err(|e| format!("无法创建删除前备份，未删除：{e}"))?;
+    if conn
+        .execute("DELETE FROM social_platforms WHERE id=?1", [id])
+        .map_err(|e| e.to_string())?
+        == 0
+    {
+        return Err("平台不存在".into());
+    }
+    Ok(crate::backup_database(&app, &conn, false, false).err())
+}
+
 fn load_publications(conn: &Connection, root: &str) -> Result<Vec<Publication>, String> {
     init(conn)?;
     let mut statement = conn.prepare("SELECT id,article_id,article_title,published_at FROM content_publications WHERE root=?1 ORDER BY published_at,id").map_err(|e| e.to_string())?;
@@ -786,6 +1160,139 @@ fn cli_content_at(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn platform_defaults_are_added_once_without_replacing_custom_entries() {
+        let conn = Connection::open_in_memory().unwrap();
+        let custom = SocialPlatform {
+            id: 0,
+            name: "知乎".into(),
+            image_url: "https://example.com/logo.png".into(),
+            url: "https://example.com/publish".into(),
+            types: vec!["article".into()],
+            enabled: true,
+        };
+        save_platform(&conn, &custom).unwrap();
+        seed_social_platforms(&conn).unwrap();
+        let platforms = load_platforms(&conn).unwrap();
+        assert_eq!(platforms.len(), 17);
+        assert_eq!(
+            platforms.iter().find(|p| p.name == "知乎").unwrap().url,
+            custom.url
+        );
+        conn.execute("DELETE FROM social_platforms WHERE name='小红书'", [])
+            .unwrap();
+        seed_social_platforms(&conn).unwrap();
+        assert_eq!(load_platforms(&conn).unwrap().len(), 16);
+    }
+
+    #[test]
+    fn existing_platforms_receive_new_defaults_only_once() {
+        let conn = Connection::open_in_memory().unwrap();
+        init(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO social_platform_metadata(key) VALUES ('defaults_v1')",
+            [],
+        )
+        .unwrap();
+        let custom = SocialPlatform {
+            id: 0,
+            name: "X".into(),
+            image_url: "https://example.com/logo.png".into(),
+            url: "https://example.com/".into(),
+            types: vec!["article".into()],
+            enabled: true,
+        };
+        let id = save_platform(&conn, &custom).unwrap();
+        seed_social_platforms(&conn).unwrap();
+        let platforms = load_platforms(&conn).unwrap();
+        assert_eq!(platforms.len(), 13);
+        assert_eq!(platforms.iter().find(|p| p.name == "X").unwrap().id, id);
+        conn.execute("DELETE FROM social_platforms WHERE id=?1", [id])
+            .unwrap();
+        seed_social_platforms(&conn).unwrap();
+        assert!(!load_platforms(&conn).unwrap().iter().any(|p| p.name == "X"));
+    }
+
+    #[test]
+    fn platform_selection_persists_and_is_removed_with_platform() {
+        let conn = Connection::open_in_memory().unwrap();
+        seed_social_platforms(&conn).unwrap();
+        let platforms = load_platforms(&conn).unwrap();
+        assert_eq!(platforms.iter().filter(|p| p.enabled).count(), 5);
+        let item = platforms.iter().find(|p| p.name == "Instagram").unwrap();
+        assert!(!item.enabled);
+        set_platform_enabled(&conn, item.id, true).unwrap();
+        assert!(
+            load_platforms(&conn)
+                .unwrap()
+                .iter()
+                .find(|p| p.id == item.id)
+                .unwrap()
+                .enabled
+        );
+        set_platform_enabled(&conn, item.id, false).unwrap();
+        conn.execute("DELETE FROM social_platforms WHERE id=?1", [item.id])
+            .unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT count(*) FROM social_platform_disabled WHERE platform_id=?1",
+                [item.id],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
+        );
+        assert!(set_platform_enabled(&conn, item.id, true).is_err());
+    }
+
+    #[test]
+    fn bulk_platform_selection_is_atomic() {
+        let conn = Connection::open_in_memory().unwrap();
+        seed_social_platforms(&conn).unwrap();
+        let items = load_platforms(&conn).unwrap();
+        let ids: Vec<i64> = items.iter().map(|item| item.id).collect();
+        set_platforms_enabled(&conn, &ids, true).unwrap();
+        assert!(load_platforms(&conn)
+            .unwrap()
+            .iter()
+            .all(|item| item.enabled));
+        assert!(set_platforms_enabled(&conn, &[ids[0], -1], false).is_err());
+        assert!(load_platforms(&conn)
+            .unwrap()
+            .iter()
+            .all(|item| item.enabled));
+        set_platforms_enabled(&conn, &ids, false).unwrap();
+        assert!(load_platforms(&conn)
+            .unwrap()
+            .iter()
+            .all(|item| !item.enabled));
+    }
+
+    #[test]
+    fn social_platforms_validate_and_round_trip() {
+        let conn = Connection::open_in_memory().unwrap();
+        let mut platform = SocialPlatform {
+            id: 0,
+            name: " 示例 ".into(),
+            image_url: "https://example.com/icon.png".into(),
+            url: "https://example.com/publish".into(),
+            types: vec!["article".into(), "video".into()],
+            enabled: true,
+        };
+        let id = save_platform(&conn, &platform).unwrap();
+        let saved = load_platforms(&conn).unwrap();
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].name, "示例");
+        assert_eq!(saved[0].types, vec!["article", "video"]);
+        platform.id = id;
+        platform.url = "javascript:alert(1)".into();
+        assert!(save_platform(&conn, &platform).is_err());
+        platform.url = "https://example.com/".into();
+        platform.types.clear();
+        assert!(save_platform(&conn, &platform).is_err());
+        assert_eq!(load_platforms(&conn).unwrap(), saved);
+    }
+
     #[test]
     fn publication_history_is_scoped_and_removed_with_article() {
         let mut db = Connection::open_in_memory().unwrap();

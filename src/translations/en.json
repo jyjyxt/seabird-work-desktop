@@ -482,5 +482,9 @@
   "视频链接": "Video URL",
   "插入链接": "Insert URL",
   "选择本地文件": "Choose local file",
-  "请输入视频文件直链，例如 MP4 链接。": "Enter a direct video file URL, such as an MP4 link."
+  "请输入视频文件直链，例如 MP4 链接。": "Enter a direct video file URL, such as an MP4 link.",
+  "打开图片链接": "Open image link",
+  "打开视频链接": "Open video link",
+  "\n图片链接：{0}": "\nImage link: {0}",
+  "\n视频链接：{0}": "\nVideo link: {0}"
 }

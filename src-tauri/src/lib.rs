@@ -761,7 +761,7 @@ fn remove_conversations(conn: &Connection, root: &str, id: Option<&str>) -> Resu
     Ok(())
 }
 fn ensure_conversations(conn: &Connection) -> Result<(), String> {
-    conn.execute_batch("CREATE TABLE IF NOT EXISTS agent_conversations (id TEXT PRIMARY KEY, root TEXT NOT NULL, data TEXT NOT NULL, updated_at INTEGER NOT NULL)").map_err(|e| e.to_string())
+    conn.execute_batch("CREATE TABLE IF NOT EXISTS agent_conversations (id TEXT PRIMARY KEY, root TEXT NOT NULL, data TEXT NOT NULL, updated_at INTEGER NOT NULL); CREATE INDEX IF NOT EXISTS agent_conversations_root_updated ON agent_conversations(root, updated_at DESC)").map_err(|e| e.to_string())
 }
 fn write_conversation(
     conn: &Connection,
@@ -784,6 +784,16 @@ fn write_conversation(
 mod conversation_tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn conversation_history_uses_workspace_time_index() {
+        let conn = Connection::open_in_memory().unwrap();
+        ensure_conversations(&conn).unwrap();
+        let mut stmt = conn.prepare("EXPLAIN QUERY PLAN SELECT data, updated_at FROM agent_conversations WHERE root='/one' ORDER BY updated_at DESC").unwrap();
+        let rows = stmt.query_map([], |row| row.get::<_, String>(3)).unwrap();
+        let plan = rows.collect::<Result<Vec<_>, _>>().unwrap().join(" ");
+        assert!(plan.contains("agent_conversations_root_updated"), "{plan}");
+        assert!(!plan.contains("TEMP B-TREE"), "{plan}");
+    }
     #[test]
     fn conversation_list_includes_last_update_time() {
         let conn = Connection::open_in_memory().unwrap();

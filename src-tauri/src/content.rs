@@ -1,7 +1,7 @@
 //! Local materials and articles. Content is isolated by the selected workspace.
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use tauri::Manager;
 
 fn source_url(input: &str) -> Result<tauri::Url, String> {
@@ -61,6 +61,10 @@ pub struct Material {
     pub title: String,
     pub source: String,
     pub url: String,
+    #[serde(default)]
+    pub image_url: String,
+    #[serde(default)]
+    pub video_url: String,
     pub note: String,
     pub tags: String,
     #[serde(default)]
@@ -109,51 +113,86 @@ fn init(conn: &Connection) -> Result<(), String> {
         CREATE TABLE IF NOT EXISTS social_platform_metadata (key TEXT PRIMARY KEY);
         CREATE TABLE IF NOT EXISTS social_platforms (id INTEGER PRIMARY KEY, name TEXT NOT NULL, image_url TEXT NOT NULL, url TEXT NOT NULL, types TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS social_platform_disabled (platform_id INTEGER PRIMARY KEY REFERENCES social_platforms(id) ON DELETE CASCADE);
-        CREATE TABLE IF NOT EXISTS content_materials (id INTEGER PRIMARY KEY, root TEXT NOT NULL, title TEXT NOT NULL, source TEXT NOT NULL DEFAULT '', url TEXT NOT NULL DEFAULT '', note TEXT NOT NULL DEFAULT '', tags TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
-        CREATE INDEX IF NOT EXISTS content_materials_root ON content_materials(root);
+        CREATE TABLE IF NOT EXISTS content_materials (id INTEGER PRIMARY KEY, root TEXT NOT NULL, title TEXT NOT NULL, source TEXT NOT NULL DEFAULT '', url TEXT NOT NULL DEFAULT '', image_url TEXT NOT NULL DEFAULT '', video_url TEXT NOT NULL DEFAULT '', note TEXT NOT NULL DEFAULT '', tags TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+        CREATE INDEX IF NOT EXISTS content_materials_root_updated ON content_materials(root, updated_at DESC, id DESC);
+        DROP INDEX IF EXISTS content_materials_root;
         CREATE TABLE IF NOT EXISTS content_material_media (material_id INTEGER NOT NULL REFERENCES content_materials(id) ON DELETE CASCADE, path TEXT NOT NULL, name TEXT NOT NULL, kind TEXT NOT NULL, PRIMARY KEY(material_id,path));
         CREATE TABLE IF NOT EXISTS content_articles (id INTEGER PRIMARY KEY, root TEXT NOT NULL, title TEXT NOT NULL, body TEXT NOT NULL DEFAULT '', versions TEXT NOT NULL DEFAULT '{}', tags TEXT NOT NULL DEFAULT '', cover TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
-        CREATE INDEX IF NOT EXISTS content_articles_root ON content_articles(root);
+        CREATE INDEX IF NOT EXISTS content_articles_root_updated ON content_articles(root, updated_at DESC, id DESC);
+        DROP INDEX IF EXISTS content_articles_root;
         CREATE TABLE IF NOT EXISTS content_article_materials (article_id INTEGER NOT NULL REFERENCES content_articles(id) ON DELETE CASCADE, material_id INTEGER NOT NULL REFERENCES content_materials(id) ON DELETE CASCADE, PRIMARY KEY(article_id, material_id));
+        CREATE INDEX IF NOT EXISTS content_article_materials_material ON content_article_materials(material_id);
         CREATE TABLE IF NOT EXISTS content_publications (id INTEGER PRIMARY KEY, root TEXT NOT NULL, article_id INTEGER NOT NULL REFERENCES content_articles(id) ON DELETE CASCADE, article_title TEXT NOT NULL, published_at INTEGER NOT NULL);
         CREATE INDEX IF NOT EXISTS content_publications_root_time ON content_publications(root, published_at);
+        CREATE INDEX IF NOT EXISTS content_publications_article ON content_publications(article_id);
         CREATE TRIGGER IF NOT EXISTS content_publication_article_title AFTER UPDATE OF title ON content_articles BEGIN UPDATE content_publications SET article_title=NEW.title WHERE article_id=NEW.id AND root=NEW.root; END;
         CREATE TABLE IF NOT EXISTS content_suggestion_saves (root TEXT NOT NULL, suggestion_key TEXT NOT NULL, kind TEXT NOT NULL, content_id INTEGER NOT NULL, PRIMARY KEY(root, suggestion_key));
+        CREATE INDEX IF NOT EXISTS content_suggestion_saves_content ON content_suggestion_saves(root, kind, content_id);
         CREATE TRIGGER IF NOT EXISTS content_material_suggestion_delete AFTER DELETE ON content_materials BEGIN DELETE FROM content_suggestion_saves WHERE root=OLD.root AND kind='material' AND content_id=OLD.id; END;
         CREATE TRIGGER IF NOT EXISTS content_article_suggestion_delete AFTER DELETE ON content_articles BEGIN DELETE FROM content_suggestion_saves WHERE root=OLD.root AND kind='article' AND content_id=OLD.id; END;")
         .map_err(|e| e.to_string())?;
-    let has_column = |column: &str| -> Result<bool, String> {
-        let mut stmt = conn
-            .prepare("PRAGMA table_info(content_articles)")
-            .map_err(|e| e.to_string())?;
-        let names = stmt
-            .query_map([], |row| row.get::<_, String>(1))
-            .map_err(|e| e.to_string())?;
-        for name in names {
-            if name.map_err(|e| e.to_string())? == column {
-                return Ok(true);
-            }
-        }
-        Ok(false)
-    };
-    if !has_column("tags")? {
-        if let Err(error) = conn.execute(
-            "ALTER TABLE content_articles ADD COLUMN tags TEXT NOT NULL DEFAULT ''",
-            [],
-        ) {
-            // Another connection may have completed the same migration concurrently.
-            if !has_column("tags")? {
-                return Err(format!("文章标签迁移失败：{error}"));
-            }
-        }
-    }
-    if !has_column("cover")? {
-        if let Err(error) = conn.execute(
-            "ALTER TABLE content_articles ADD COLUMN cover TEXT NOT NULL DEFAULT ''",
-            [],
-        ) {
-            if !has_column("cover")? {
-                return Err(format!("文章封面迁移失败：{error}"));
+    migrate_columns(
+        conn,
+        "content_articles",
+        &[
+            (
+                "tags",
+                "ALTER TABLE content_articles ADD COLUMN tags TEXT NOT NULL DEFAULT ''",
+                "文章标签迁移失败",
+            ),
+            (
+                "cover",
+                "ALTER TABLE content_articles ADD COLUMN cover TEXT NOT NULL DEFAULT ''",
+                "文章封面迁移失败",
+            ),
+        ],
+    )?;
+    migrate_columns(
+        conn,
+        "content_materials",
+        &[
+            (
+                "image_url",
+                "ALTER TABLE content_materials ADD COLUMN image_url TEXT NOT NULL DEFAULT ''",
+                "素材图片链接迁移失败",
+            ),
+            (
+                "video_url",
+                "ALTER TABLE content_materials ADD COLUMN video_url TEXT NOT NULL DEFAULT ''",
+                "素材视频链接迁移失败",
+            ),
+        ],
+    )?;
+    Ok(())
+}
+
+// Check old schemas once per table and tolerate another process completing the migration.
+fn migrate_columns(
+    conn: &Connection,
+    table: &str,
+    migrations: &[(&str, &str, &str)],
+) -> Result<(), String> {
+    let mut stmt = conn
+        .prepare("SELECT name FROM pragma_table_info(?1)")
+        .map_err(|e| e.to_string())?;
+    let columns = stmt
+        .query_map([table], |row| row.get::<_, String>(0))
+        .map_err(|e| e.to_string())?
+        .collect::<Result<std::collections::HashSet<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    for &(column, sql, message) in migrations {
+        if !columns.contains(column) {
+            if let Err(error) = conn.execute(sql, []) {
+                let exists: bool = conn
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE name=?2)",
+                        params![table, column],
+                        |row| row.get(0),
+                    )
+                    .map_err(|e| e.to_string())?;
+                if !exists {
+                    return Err(format!("{message}：{error}"));
+                }
             }
         }
     }
@@ -209,82 +248,134 @@ fn record_suggestion(
     }
     Ok(())
 }
-fn load(conn: &Connection, root: &str) -> Result<ContentData, String> {
-    init(conn)?;
-    let mut statement = conn.prepare("SELECT id,title,source,url,note,tags,updated_at FROM content_materials WHERE root=?1 ORDER BY updated_at DESC,id DESC").map_err(|e| e.to_string())?;
-    let mut materials = statement
-        .query_map([root], |r| {
-            Ok(Material {
-                id: r.get(0)?,
-                title: r.get(1)?,
-                source: r.get(2)?,
-                url: r.get(3)?,
-                note: r.get(4)?,
-                tags: r.get(5)?,
-                media: Vec::new(),
-                updated_at: r.get(6)?,
-            })
-        })
-        .map_err(|e| e.to_string())?
-        .collect::<Result<Vec<_>, _>>()
+fn load_materials(conn: &Connection, root: &str, id: Option<i64>) -> Result<Vec<Material>, String> {
+    let sql = if id.is_some() {
+        "SELECT id,title,source,url,note,tags,updated_at,image_url,video_url FROM content_materials WHERE root=?1 AND id=?2"
+    } else {
+        "SELECT id,title,source,url,note,tags,updated_at,image_url,video_url FROM content_materials WHERE root=?1 ORDER BY updated_at DESC,id DESC"
+    };
+    let parameters: Vec<&dyn rusqlite::ToSql> = match &id {
+        Some(id) => vec![&root, id],
+        None => vec![&root],
+    };
+    let mut statement = conn.prepare(sql).map_err(|e| e.to_string())?;
+    let mut rows = statement
+        .query(parameters.as_slice())
         .map_err(|e| e.to_string())?;
-    for material in &mut materials {
-        let mut media = conn.prepare("SELECT path,name,kind FROM content_material_media WHERE material_id=?1 ORDER BY rowid").map_err(|e| e.to_string())?;
-        material.media = media
-            .query_map([material.id], |r| {
-                Ok(MediaFile {
-                    path: r.get(0)?,
-                    name: r.get(1)?,
-                    kind: r.get(2)?,
-                })
-            })
-            .map_err(|e| e.to_string())?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| e.to_string())?;
+    let mut materials = Vec::new();
+    let mut positions = HashMap::new();
+    while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+        let material = Material {
+            id: row.get(0).map_err(|e| e.to_string())?,
+            title: row.get(1).map_err(|e| e.to_string())?,
+            source: row.get(2).map_err(|e| e.to_string())?,
+            url: row.get(3).map_err(|e| e.to_string())?,
+            image_url: row.get(7).map_err(|e| e.to_string())?,
+            video_url: row.get(8).map_err(|e| e.to_string())?,
+            note: row.get(4).map_err(|e| e.to_string())?,
+            tags: row.get(5).map_err(|e| e.to_string())?,
+            media: Vec::new(),
+            updated_at: row.get(6).map_err(|e| e.to_string())?,
+        };
+        positions.insert(material.id, materials.len());
+        materials.push(material);
     }
-    let mut statement = conn.prepare("SELECT id,title,body,versions,tags,updated_at,cover FROM content_articles WHERE root=?1 ORDER BY updated_at DESC,id DESC").map_err(|e| e.to_string())?;
-    let rows = statement
-        .query_map([root], |r| {
-            Ok((
-                r.get::<_, i64>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-                r.get::<_, String>(3)?,
-                r.get::<_, String>(4)?,
-                r.get::<_, String>(5)?,
-                r.get::<_, String>(6)?,
-            ))
-        })
+    let sql = if id.is_some() {
+        "SELECT media.material_id,media.path,media.name,media.kind,media.rowid FROM content_material_media media JOIN content_materials m ON m.id=media.material_id WHERE m.root=?1 AND m.id=?2"
+    } else {
+        "SELECT media.material_id,media.path,media.name,media.kind,media.rowid FROM content_material_media media JOIN content_materials m ON m.id=media.material_id WHERE m.root=?1"
+    };
+    let mut statement = conn.prepare(sql).map_err(|e| e.to_string())?;
+    let mut rows = statement
+        .query(parameters.as_slice())
+        .map_err(|e| e.to_string())?;
+    let mut media_by_material: Vec<Vec<(i64, MediaFile)>> =
+        (0..materials.len()).map(|_| Vec::new()).collect();
+    while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+        let material_id: i64 = row.get(0).map_err(|e| e.to_string())?;
+        if let Some(&position) = positions.get(&material_id) {
+            media_by_material[position].push((
+                row.get(4).map_err(|e| e.to_string())?,
+                MediaFile {
+                    path: row.get(1).map_err(|e| e.to_string())?,
+                    name: row.get(2).map_err(|e| e.to_string())?,
+                    kind: row.get(3).map_err(|e| e.to_string())?,
+                },
+            ));
+        }
+    }
+    for (material, mut media) in materials.iter_mut().zip(media_by_material) {
+        media.sort_unstable_by_key(|(rowid, _)| *rowid);
+        material.media = media.into_iter().map(|(_, file)| file).collect();
+    }
+    Ok(materials)
+}
+
+fn load_articles(conn: &Connection, root: &str, id: Option<i64>) -> Result<Vec<Article>, String> {
+    let sql = if id.is_some() {
+        "SELECT id,title,body,versions,tags,updated_at,cover FROM content_articles WHERE root=?1 AND id=?2"
+    } else {
+        "SELECT id,title,body,versions,tags,updated_at,cover FROM content_articles WHERE root=?1 ORDER BY updated_at DESC,id DESC"
+    };
+    let parameters: Vec<&dyn rusqlite::ToSql> = match &id {
+        Some(id) => vec![&root, id],
+        None => vec![&root],
+    };
+    let mut statement = conn.prepare(sql).map_err(|e| e.to_string())?;
+    let mut rows = statement
+        .query(parameters.as_slice())
         .map_err(|e| e.to_string())?;
     let mut articles = Vec::new();
-    for row in rows {
-        let (id, title, body, versions, tags, updated_at, cover) =
-            row.map_err(|e| e.to_string())?;
-        let mut links = conn.prepare("SELECT material_id FROM content_article_materials WHERE article_id=?1 ORDER BY material_id").map_err(|e| e.to_string())?;
-        let material_ids = links
-            .query_map([id], |r| r.get(0))
-            .map_err(|e| e.to_string())?
-            .collect::<Result<Vec<i64>, _>>()
-            .map_err(|e| e.to_string())?;
-        articles.push(Article {
-            id,
-            title,
-            body,
-            tags,
+    let mut positions = HashMap::new();
+    while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+        let versions: String = row.get(3).map_err(|e| e.to_string())?;
+        let cover: String = row.get(6).map_err(|e| e.to_string())?;
+        let article = Article {
+            id: row.get(0).map_err(|e| e.to_string())?,
+            title: row.get(1).map_err(|e| e.to_string())?,
+            body: row.get(2).map_err(|e| e.to_string())?,
+            tags: row.get(4).map_err(|e| e.to_string())?,
             versions: serde_json::from_str(&versions)
                 .map_err(|e| format!("文章平台版本读取失败：{e}"))?,
-            material_ids,
+            material_ids: Vec::new(),
             cover: if cover.is_empty() {
                 None
             } else {
                 Some(serde_json::from_str(&cover).map_err(|e| format!("文章封面读取失败：{e}"))?)
             },
-            updated_at,
-        });
+            updated_at: row.get(5).map_err(|e| e.to_string())?,
+        };
+        positions.insert(article.id, articles.len());
+        articles.push(article);
     }
+    let sql = if id.is_some() {
+        "SELECT links.article_id,links.material_id FROM content_article_materials links JOIN content_articles a ON a.id=links.article_id WHERE a.root=?1 AND a.id=?2"
+    } else {
+        "SELECT links.article_id,links.material_id FROM content_article_materials links JOIN content_articles a ON a.id=links.article_id WHERE a.root=?1"
+    };
+    let mut statement = conn.prepare(sql).map_err(|e| e.to_string())?;
+    let mut rows = statement
+        .query(parameters.as_slice())
+        .map_err(|e| e.to_string())?;
+    while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+        let article_id: i64 = row.get(0).map_err(|e| e.to_string())?;
+        if let Some(&position) = positions.get(&article_id) {
+            articles[position]
+                .material_ids
+                .push(row.get(1).map_err(|e| e.to_string())?);
+        }
+    }
+    for article in &mut articles {
+        article.material_ids.sort_unstable();
+    }
+    Ok(articles)
+}
+
+fn load(conn: &Connection, root: &str) -> Result<ContentData, String> {
+    init(conn)?;
     Ok(ContentData {
-        materials,
-        articles,
+        materials: load_materials(conn, root, None)?,
+        articles: load_articles(conn, root, None)?,
     })
 }
 #[cfg(test)]
@@ -313,6 +404,8 @@ fn save_material_with_key(
     if item.title.len() > 2000
         || item.note.len() > 2_000_000
         || item.url.len() > 10000
+        || item.image_url.len() > 10000
+        || item.video_url.len() > 10000
         || item.tags.len() > 10000
         || item.source.len() > 1000
     {
@@ -332,16 +425,16 @@ fn save_material_with_key(
     }
     if let Some(expected) = expected {
         if expected.id != item.id
-            || load(&tx, root)?.materials.iter().find(|v| v.id == item.id) != Some(expected)
+            || load_materials(&tx, root, Some(item.id))?.first() != Some(expected)
         {
             return Err("素材已被修改，请重新读取后再保存".into());
         }
     }
     let id = if item.id == 0 {
-        tx.execute("INSERT INTO content_materials(root,title,source,url,note,tags) VALUES (?1,?2,?3,?4,?5,?6)",params![root,item.title.trim(),item.source,item.url,item.note,item.tags]).map_err(|e|e.to_string())?;
+        tx.execute("INSERT INTO content_materials(root,title,source,url,note,tags,image_url,video_url) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",params![root,item.title.trim(),item.source,item.url,item.note,item.tags,item.image_url,item.video_url]).map_err(|e|e.to_string())?;
         tx.last_insert_rowid()
     } else {
-        let n = tx.execute("UPDATE content_materials SET title=?1,source=?2,url=?3,note=?4,tags=?5,updated_at=CURRENT_TIMESTAMP WHERE id=?6 AND root=?7",params![item.title.trim(),item.source,item.url,item.note,item.tags,item.id,root]).map_err(|e|e.to_string())?;
+        let n = tx.execute("UPDATE content_materials SET title=?1,source=?2,url=?3,note=?4,tags=?5,image_url=?6,video_url=?7,updated_at=CURRENT_TIMESTAMP WHERE id=?8 AND root=?9",params![item.title.trim(),item.source,item.url,item.note,item.tags,item.image_url,item.video_url,item.id,root]).map_err(|e|e.to_string())?;
         if n == 0 {
             return Err("素材不存在或不属于当前工作目录".into());
         }
@@ -426,7 +519,7 @@ fn save_article_with_key(
     }
     if let Some(expected) = expected {
         if expected.id != item.id
-            || load(&tx, root)?.articles.iter().find(|v| v.id == item.id) != Some(expected)
+            || load_articles(&tx, root, Some(item.id))?.first() != Some(expected)
         {
             return Err("文章已被修改，请重新读取后再保存".into());
         }
@@ -1385,6 +1478,8 @@ mod tests {
             title: "素材".into(),
             source: String::new(),
             url: String::new(),
+            image_url: String::new(),
+            video_url: String::new(),
             note: "内容".into(),
             tags: String::new(),
             media: vec![],
@@ -1459,6 +1554,200 @@ mod tests {
         init(&db).unwrap();
         assert_eq!(load(&db, "/workspace").unwrap().articles.len(), 1);
     }
+    #[test]
+    fn checked_saves_only_read_the_record_being_updated() {
+        let mut db = Connection::open_in_memory().unwrap();
+        let material = Material {
+            id: 0,
+            title: "素材".into(),
+            source: String::new(),
+            url: String::new(),
+            image_url: String::new(),
+            video_url: String::new(),
+            note: String::new(),
+            tags: String::new(),
+            media: vec![],
+            updated_at: String::new(),
+        };
+        let id = save_material(&mut db, "/one", &material).unwrap();
+        let article = Article {
+            id: 0,
+            title: "文章".into(),
+            body: String::new(),
+            tags: String::new(),
+            versions: BTreeMap::new(),
+            material_ids: vec![id],
+            cover: None,
+            updated_at: String::new(),
+        };
+        let article_id = save_article(&mut db, "/one", &article).unwrap();
+        let original_material = load_materials(&db, "/one", Some(id)).unwrap().remove(0);
+        let original_article = load_articles(&db, "/one", Some(article_id))
+            .unwrap()
+            .remove(0);
+        // A malformed unrelated article must not block saving a different record.
+        db.execute("INSERT INTO content_articles(root,title,versions) VALUES('/one','unrelated','invalid json')", []).unwrap();
+        let mut changed_material = original_material.clone();
+        changed_material.note = "更新".into();
+        save_material_checked(&mut db, "/one", &changed_material, Some(&original_material))
+            .unwrap();
+        let mut changed_article = original_article.clone();
+        changed_article.body = "更新".into();
+        save_article_checked(&mut db, "/one", &changed_article, Some(&original_article)).unwrap();
+        assert!(
+            save_article_checked(&mut db, "/one", &original_article, Some(&original_article))
+                .is_err()
+        );
+        assert!(load_articles(&db, "/other", Some(article_id))
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn list_queries_and_relationship_deletions_have_indexes() {
+        let db = Connection::open_in_memory().unwrap();
+        init(&db).unwrap();
+        let plan = |sql: &str| -> String {
+            let mut stmt = db.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+            let rows = stmt.query_map([], |row| row.get::<_, String>(3)).unwrap();
+            rows.collect::<Result<Vec<_>, _>>().unwrap().join(" ")
+        };
+        for (sql, index) in [
+            ("SELECT id FROM content_materials WHERE root='/one' ORDER BY updated_at DESC,id DESC", "content_materials_root_updated"),
+            ("SELECT id FROM content_articles WHERE root='/one' ORDER BY updated_at DESC,id DESC", "content_articles_root_updated"),
+            ("SELECT article_id FROM content_article_materials WHERE material_id=1", "content_article_materials_material"),
+            ("SELECT id FROM content_publications WHERE article_id=1", "content_publications_article"),
+            ("SELECT suggestion_key FROM content_suggestion_saves WHERE root='/one' AND kind='article' AND content_id=1", "content_suggestion_saves_content"),
+        ] {
+            let detail = plan(sql);
+            assert!(detail.contains(index), "{sql}: {detail}");
+            assert!(!detail.contains("TEMP B-TREE"), "{sql}: {detail}");
+        }
+        for sql in [
+            "SELECT media.material_id,media.path,media.name,media.kind,media.rowid FROM content_material_media media JOIN content_materials m ON m.id=media.material_id WHERE m.root='/one'",
+            "SELECT links.article_id,links.material_id FROM content_article_materials links JOIN content_articles a ON a.id=links.article_id WHERE a.root='/one'",
+        ] {
+            let detail = plan(sql);
+            assert!(!detail.contains("SCAN "), "{sql}: {detail}");
+            assert!(!detail.contains("TEMP B-TREE"), "{sql}: {detail}");
+        }
+        init(&db).unwrap();
+    }
+
+    #[test]
+    fn bulk_load_preserves_attachment_order_and_workspace_isolation() {
+        let mut db = Connection::open_in_memory().unwrap();
+        let material = |title: &str, root: &str| Material {
+            id: 0,
+            title: title.into(),
+            source: String::new(),
+            url: String::new(),
+            image_url: String::new(),
+            video_url: String::new(),
+            note: String::new(),
+            tags: String::new(),
+            media: ["z.png", "a.png"]
+                .iter()
+                .map(|name| MediaFile {
+                    path: format!("{root}/seabird-media/{name}"),
+                    name: (*name).into(),
+                    kind: "image".into(),
+                })
+                .collect(),
+            updated_at: String::new(),
+        };
+        let first = save_material(&mut db, "/one", &material("first", "/one")).unwrap();
+        let second = save_material(&mut db, "/one", &material("second", "/one")).unwrap();
+        save_material(&mut db, "/two", &material("other", "/two")).unwrap();
+        let article = Article {
+            id: 0,
+            title: "文章".into(),
+            body: String::new(),
+            tags: String::new(),
+            versions: BTreeMap::new(),
+            material_ids: vec![second, first],
+            cover: None,
+            updated_at: String::new(),
+        };
+        save_article(&mut db, "/one", &article).unwrap();
+        let data = load(&db, "/one").unwrap();
+        assert_eq!(data.materials.len(), 2);
+        for item in data.materials {
+            assert_eq!(
+                item.media
+                    .iter()
+                    .map(|m| m.name.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["z.png", "a.png"]
+            );
+        }
+        assert_eq!(data.articles[0].material_ids, vec![first, second]);
+        assert_eq!(load(&db, "/two").unwrap().materials.len(), 1);
+        assert!(load(&db, "/two").unwrap().articles.is_empty());
+    }
+
+    #[test]
+    fn large_workspace_loads_and_updates_with_links() {
+        let mut db = Connection::open_in_memory().unwrap();
+        init(&db).unwrap();
+        {
+            let tx = db.transaction().unwrap();
+            for id in 1..=2000 {
+                tx.execute(
+                    "INSERT INTO content_materials(id,root,title) VALUES(?1,'/large',?2)",
+                    params![id, format!("素材 {id}")],
+                )
+                .unwrap();
+                tx.execute(
+                    "INSERT INTO content_articles(id,root,title) VALUES(?1,'/large',?2)",
+                    params![id, format!("文章 {id}")],
+                )
+                .unwrap();
+                tx.execute(
+                    "INSERT INTO content_article_materials(article_id,material_id) VALUES(?1,?1)",
+                    [id],
+                )
+                .unwrap();
+                tx.execute("INSERT INTO content_material_media(material_id,path,name,kind) VALUES(?1,?2,'image.png','image')", params![id, format!("/large/seabird-media/{id}.png")]).unwrap();
+            }
+            tx.commit().unwrap();
+        }
+        let data = load(&db, "/large").unwrap();
+        assert_eq!((data.materials.len(), data.articles.len()), (2000, 2000));
+        assert!(data.materials.iter().all(|m| m.media.len() == 1));
+        assert!(data.articles.iter().all(|a| a.material_ids == vec![a.id]));
+        let original = load_articles(&db, "/large", Some(1000)).unwrap().remove(0);
+        let mut changed = original.clone();
+        changed.body = "更新".into();
+        save_article_checked(&mut db, "/large", &changed, Some(&original)).unwrap();
+        assert_eq!(
+            load_articles(&db, "/large", Some(1000)).unwrap()[0].body,
+            "更新"
+        );
+    }
+
+    #[test]
+    fn material_media_links_migrate_save_and_detect_conflicts() {
+        let mut db = Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE content_materials (id INTEGER PRIMARY KEY, root TEXT NOT NULL, title TEXT NOT NULL, source TEXT NOT NULL DEFAULT '', url TEXT NOT NULL DEFAULT '', note TEXT NOT NULL DEFAULT '', tags TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP); INSERT INTO content_materials(root,title,url,note) VALUES('/one','旧素材','https://example.com/original','保留的备注');").unwrap();
+        let original = load(&db, "/one").unwrap().materials.remove(0);
+        assert_eq!(
+            (original.image_url.as_str(), original.video_url.as_str()),
+            ("", "")
+        );
+        let mut updated = original.clone();
+        updated.image_url = "https://example.com/picture.jpg".into();
+        updated.video_url = "https://example.com/video.mp4".into();
+        save_material_checked(&mut db, "/one", &updated, Some(&original)).unwrap();
+        let saved = load(&db, "/one").unwrap().materials.remove(0);
+        assert_eq!(saved.image_url, updated.image_url);
+        assert_eq!(saved.video_url, updated.video_url);
+        assert_eq!(saved.url, "https://example.com/original");
+        assert_eq!(saved.note, "保留的备注");
+        assert!(save_material_checked(&mut db, "/one", &original, Some(&original)).is_err());
+        assert!(load(&db, "/other").unwrap().materials.is_empty());
+    }
+
     #[test]
     fn article_cover_migrates_round_trips_and_guards_conflicts() {
         let mut db = Connection::open_in_memory().unwrap();
@@ -1601,6 +1890,8 @@ mod tests {
             title: "图片素材".into(),
             source: String::new(),
             url: String::new(),
+            image_url: String::new(),
+            video_url: String::new(),
             note: String::new(),
             tags: String::new(),
             media: vec![media.clone()],
@@ -1627,6 +1918,8 @@ mod tests {
             title: "素材".into(),
             source: "X".into(),
             url: "https://x.com".into(),
+            image_url: String::new(),
+            video_url: String::new(),
             note: "备注".into(),
             tags: "AI".into(),
             media: Vec::new(),

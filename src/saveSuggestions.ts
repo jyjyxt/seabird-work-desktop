@@ -4,6 +4,8 @@ export type SaveSuggestion = {
   body: string;
   source: string;
   url: string;
+  image_url: string;
+  video_url: string;
   tags: string;
 };
 
@@ -17,8 +19,8 @@ export function parseSaveSuggestions(text: string): { text: string; suggestions:
     const suggestions: SaveSuggestion[] = [];
     for (const item of parsed) {
       if (!item || typeof item !== 'object' || !['material', 'article'].includes(item.kind) || typeof item.title !== 'string' || !item.title.trim() || typeof item.body !== 'string' || !item.body.trim()) return { text, suggestions: [] };
-      if (['source', 'url', 'tags'].some(key => item[key] !== undefined && typeof item[key] !== 'string')) return { text, suggestions: [] };
-      suggestions.push({ kind: item.kind, title: item.title.trim(), body: item.body, source: item.source || '', url: item.url || '', tags: item.tags || '' });
+      if (['source', 'url', 'image_url', 'video_url', 'tags'].some(key => item[key] !== undefined && typeof item[key] !== 'string')) return { text, suggestions: [] };
+      suggestions.push({ kind: item.kind, title: item.title.trim(), body: item.body, source: item.source || '', url: item.url || '', image_url: item.image_url || '', video_url: item.video_url || '', tags: item.tags || '' });
     }
     return { text: (text.slice(0, match.index) + text.slice(match.index + match[0].length)).trim(), suggestions };
   } catch { return { text, suggestions: [] }; }

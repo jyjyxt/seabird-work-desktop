@@ -500,5 +500,10 @@
   "{0} 篇文章": "{0} articles",
   "{0} 条素材": "{0} materials",
   "暂无标签": "No tags yet",
-  "数据库备份最多每 5 分钟更新一次，可能落后于最后一次保存。备份不包含图片和视频，请另行备份素材目录。": "Database backups update at most once every 5 minutes and may be older than your last save. Images and videos are not included; back up the content folder separately."
+  "数据库备份最多每 5 分钟更新一次，可能落后于最后一次保存。备份不包含图片和视频，请另行备份素材目录。": "Database backups update at most once every 5 minutes and may be older than your last save. Images and videos are not included; back up the content folder separately.",
+  "请先切换到生成建议时的工作目录。": "Switch to the workspace where this suggestion was created.",
+  "找不到原文章，可能已被删除。": "The original article could not be found. It may have been deleted.",
+  "当前文章有未保存的修改，切换文章将丢失这些修改，确定继续吗？": "The current article has unsaved changes. Switch articles and discard them?",
+  "已取消切换文章。": "Article switch cancelled.",
+  "正在读取文章，请稍后再试。": "Loading articles. Please try again shortly."
 }

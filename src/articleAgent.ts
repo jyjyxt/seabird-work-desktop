@@ -1,3 +1,5 @@
+import type { Article } from './articleAutoSave';
+
 export type ArticleTarget = {
   root: string;
   id: number;
@@ -5,6 +7,7 @@ export type ArticleTarget = {
   platform: string;
   title: string;
   body: string;
+  draft?: Article;
   selection?: { start: number; end: number; text: string };
 };
 export type AgentContext = { text: string; article?: ArticleTarget };
@@ -47,4 +50,20 @@ export function undoArticleEdit<T extends { id: number; updated_at: string }>(be
   const expected = { ...after, id: current.id, updated_at: current.updated_at };
   if (JSON.stringify(current) !== JSON.stringify(expected)) return null;
   return { ...before, id: current.id, updated_at: current.updated_at };
+}
+
+// A new article has no database ID yet, so the conversation carries a copy
+// that can be reopened after leaving the editor or restarting the app.
+export function findArticleForSuggestion(target: ArticleTarget, current: Article | null, editor: string, articles: Article[], parked: Article | undefined): Article | null {
+  if (current && (target.editor === editor || (target.id !== 0 && current.id === target.id))) return current;
+  const id = target.id || parked?.id;
+  if (id) return articles.find(article => article.id === id) || null;
+  return parked || target.draft || null;
+}
+
+export function linkSavedArticle(target: ArticleTarget | undefined | null, root: string, editor: string, id: number): ArticleTarget | undefined {
+  if (!target) return undefined;
+  if (target.root !== root || target.editor !== editor || target.id !== 0) return target;
+  const { draft: _draft, ...rest } = target;
+  return { ...rest, id };
 }

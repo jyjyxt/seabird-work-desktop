@@ -9,7 +9,7 @@ import ArticleEditor from './ArticleEditor';
 import PublicationCalendar from './PublicationCalendar';
 import SocialPlatforms from './SocialPlatforms';
 import { canAutoSaveArticle, isSavedArticle, mergeSavedArticle, startArticleAutoSave, type Article } from './articleAutoSave';
-import { applyArticleEdit, resolveArticleSelection, undoArticleEdit, type AgentContext, type ArticleEdit, type ArticleTarget } from './articleAgent';
+import { applyArticleEdit, findArticleForSuggestion, resolveArticleSelection, undoArticleEdit, type AgentContext, type ArticleEdit, type ArticleTarget } from './articleAgent';
 
 export type ContentView = 'home' | 'materials' | 'articles' | 'calendar' | 'discover';
 type MediaFile = { path: string; name: string; kind: 'image' | 'video' };
@@ -18,7 +18,7 @@ type ArticleUndo = { root: string; editor: string; before: Article; after: Artic
 type ContentTag = { kind: 'article' | 'material'; name: string; count: number };
 type ContentData = { materials: Material[]; articles: Article[]; tags: ContentTag[] };
 type SaveResult = { id: number; backup_warning: string | null };
-type Props = { view: string; root: string; desktop: boolean; agentRunning: boolean; agentSetupNeeded: boolean; onAgentSettings: () => void; onReferenceMaterials: (materials: { id: number; title: string }[]) => boolean; onNavigate: (view: ContentView) => void; onDirty: (dirty: boolean) => void; onBusy: (busy: boolean) => void; onAgent: (prompt: string, context?: () => AgentContext, selectedText?: string, prefill?: boolean, newSession?: boolean) => boolean; onArticleContext: (context: (() => AgentContext) | null) => void; onArticleApply: (apply: ((target: ArticleTarget, edit: ArticleEdit, onUndo: () => void) => string | null) | null) => void };
+type Props = { view: string; root: string; desktop: boolean; agentRunning: boolean; agentSetupNeeded: boolean; onAgentSettings: () => void; onReferenceMaterials: (materials: { id: number; title: string }[]) => boolean; onNavigate: (view: ContentView) => void; onDirty: (dirty: boolean) => void; onBusy: (busy: boolean) => void; onAgent: (prompt: string, context?: () => AgentContext, selectedText?: string, prefill?: boolean, newSession?: boolean) => boolean; onArticleContext: (context: (() => AgentContext) | null) => void; onArticleApply: (apply: ((target: ArticleTarget, edit: ArticleEdit, onUndo: () => void) => string | null) | null) => void; onDraftSaved: (root: string, editor: string, id: number) => void };
 const emptyMaterial = (): Material => ({ id: 0, title: '', source: '', url: '', image_url: '', video_url: '', note: '', tags: '', media: [], updated_at: '' });
 const emptyArticle = (material_ids: number[] = []): Article => ({ id: 0, title: '', body: '', tags: '', versions: {}, material_ids, cover: null, updated_at: '' });
 const parseTags = (value: string = '') => [...new Map(value.split(/[,，\r\n]/).map(tag => tag.trim()).filter(Boolean).map(tag => [tag.toLowerCase(), tag])).values()];
@@ -71,11 +71,13 @@ function previewLoad(root: string): ContentData {
   catch { return { materials: [], articles: [], tags: [] }; }
 }
 
-export default function ContentWorkspace({ view, root, desktop, agentRunning, agentSetupNeeded, onAgentSettings, onReferenceMaterials, onNavigate, onDirty, onBusy, onAgent, onArticleContext, onArticleApply }: Props) {
+export default function ContentWorkspace({ view, root, desktop, agentRunning, agentSetupNeeded, onAgentSettings, onReferenceMaterials, onNavigate, onDirty, onBusy, onAgent, onArticleContext, onArticleApply, onDraftSaved }: Props) {
   const { t, tError, language } = useI18n();
   const stamp = (date: string) => date ? `${date.slice(0, 16).replace('T', ' ')} UTC` : t('刚刚创建');
   const [data, setData] = useState<ContentData>({ materials: [], articles: [], tags: [] });
   const [loading, setLoading] = useState(false);
+  const loadingRef = React.useRef(loading);
+  loadingRef.current = loading;
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
   const [search, setSearch] = useState('');
@@ -95,6 +97,10 @@ export default function ContentWorkspace({ view, root, desktop, agentRunning, ag
   const platform = 'original';
   const editorEpoch = React.useRef(0);
   const editorSession = React.useRef(`${Date.now()}-${Math.random().toString(36).slice(2)}`);
+  const articleEditor = React.useRef('');
+  const parkedArticles = React.useRef(new Map<string, Article>());
+  const latestData = React.useRef(data);
+  latestData.current = data;
   const liveEditor = React.useRef({ article, material, platform, view, root });
   liveEditor.current = { article, material, platform, view, root };
   const [saving, setSaving] = useState(false);
@@ -110,41 +116,54 @@ export default function ContentWorkspace({ view, root, desktop, agentRunning, ag
   const activeRoot = React.useRef(root);
   activeRoot.current = root;
   const editorGeneration = editorEpoch.current;
+  const editorIdentity = articleEditor.current;
   const visible = ['home', 'materials', 'articles', 'calendar', 'discover'].includes(view);
   const edit = view === 'materials' ? material : view === 'articles' ? article : null;
   const dirty = !!edit && JSON.stringify(edit) !== (view === 'materials' ? materialSnapshot.current : articleSnapshot.current);
   const anyDirty = !!(material && JSON.stringify(material) !== materialSnapshot.current) || !!(article && JSON.stringify(article) !== articleSnapshot.current);
   const articleContext = (selection?: ArticleTarget['selection'], expectedBody?: string): AgentContext => {
     const current = liveEditor.current;
-    if (current.view !== 'articles' || !current.article || current.root !== root || editorEpoch.current !== editorGeneration || current.platform !== platform) throw new Error(t("文章或版本已切换，请重新选择。"));
+    if (current.view !== 'articles' || !current.article || current.root !== root || articleEditor.current !== editorIdentity || current.platform !== platform) throw new Error(t("文章或版本已切换，请重新选择。"));
     const title = current.article.title;
     const body = current.article.body;
     const resolved = selection && expectedBody !== undefined ? resolveArticleSelection(expectedBody, body, selection) : null;
     if (selection && !resolved) throw new Error(t("选中的内容已变化或出现多次，请重新选择。"));
-    const target: ArticleTarget = { root, id: current.article.id, editor: `${editorSession.current}:${editorGeneration}`, platform, title, body, ...(resolved ? { selection: resolved } : {}) };
+    const target: ArticleTarget = { root, id: current.article.id, editor: editorIdentity, platform, title, body, ...(!current.article.id ? { draft: structuredClone(current.article) } : {}), ...(resolved ? { selection: resolved } : {}) };
+    parkedArticles.current.set(editorIdentity, structuredClone(current.article));
     return { article: target, text: `当前正在编辑这篇文章。以下是页面上的最新内容（可能尚未保存），所有修改默认针对这篇文章，不要创建新文章或直接写入数据库，除非用户明确要求。${selection ? '用户选中了一段文字，只修改选中部分；不要包含其他内容。' : '用户要求修改时，只修改有要求的部分，并保留其他正文、图片和视频。'}\n标题：${JSON.stringify(title)}\n正文：${JSON.stringify(body)}\n关联素材 ID：${current.article.material_ids.join('、') || '无'}。需要使用这些素材时请读取完整内容。${selection ? `\n选中文字：${JSON.stringify(selection.text)}` : ''}` };
   };
   useEffect(() => {
     onArticleContext(view === 'articles' && article ? () => articleContext() : null);
     return () => onArticleContext(null);
-  }, [view, article, platform, root, editorGeneration, onArticleContext]);
+  }, [view, article, platform, root, editorIdentity, onArticleContext]);
   useEffect(() => {
     onArticleApply((target, edit, onUndo) => {
       const current = liveEditor.current;
-      if (savingRef.current) return t('正在保存文章，请完成后再应用修改。');
-      if (current.view !== 'articles' || current.root !== target.root || !current.article || (target.id === 0 ? target.editor !== `${editorSession.current}:${editorEpoch.current}` : current.article.id !== target.id) || current.platform !== target.platform) return t('请先打开生成建议时的文章和版本。');
-      const title = current.article.title;
-      const body = current.article.body;
-      const updated = applyArticleEdit(target, { title, body }, edit);
+      if (savingRef.current || autoSavingRef.current) return t('正在保存文章，请完成后再应用修改。');
+      if (current.root !== target.root || current.platform !== target.platform) return t('请先切换到生成建议时的工作目录。');
+      const original = findArticleForSuggestion(target, current.article, articleEditor.current, latestData.current.articles, parkedArticles.current.get(target.editor));
+      if (!original) return loadingRef.current ? t('正在读取文章，请稍后再试。') : t('找不到原文章，可能已被删除。');
+      const updated = applyArticleEdit(target, { title: original.title, body: original.body }, edit);
       if (!updated) return target.selection ? t('选中文字已变化或出现多次，请重新选中并请求修改。') : t('文章内容已变化，请重新请求修改。');
-      const next = { ...current.article, title: updated.title, body: updated.body };
-      setArticleUndo({ root: current.root, editor: `${editorSession.current}:${editorEpoch.current}`, before: current.article, after: next, onUndo });
+      if (original !== current.article) {
+        if (current.article && JSON.stringify(current.article) !== articleSnapshot.current && !window.confirm(t('当前文章有未保存的修改，切换文章将丢失这些修改，确定继续吗？'))) return t('已取消切换文章。');
+        if (current.article && articleEditor.current && parkedArticles.current.has(articleEditor.current)) parkedArticles.current.set(articleEditor.current, JSON.parse(articleSnapshot.current));
+        editorEpoch.current++;
+        articleEditor.current = target.editor;
+        articleSnapshot.current = JSON.stringify(original);
+        autoSavePaused.current = false;
+        setAutoSaved(false);
+        setArticleEditing(original.id === 0);
+      }
+      const next = { ...original, title: updated.title, body: updated.body };
+      setArticleUndo({ root: current.root, editor: articleEditor.current, before: original, after: next, onUndo });
       liveEditor.current.article = next;
       setArticle(next); setError(''); setMessage(t("修改已应用，请保存文章"));
+      onNavigate('articles');
       return null;
     });
     return () => onArticleApply(null);
-  }, [onArticleApply]);
+  }, [onArticleApply, onNavigate]);
   const closeState = React.useRef({ anyDirty, saving: saving || autoSaving });
   closeState.current = { anyDirty, saving: saving || autoSaving };
   useEffect(() => { onDirty(anyDirty); }, [anyDirty, onDirty]);
@@ -167,7 +186,7 @@ export default function ContentWorkspace({ view, root, desktop, agentRunning, ag
     catch (e) { if (!silent && generation === loadGeneration.current) setError(t("无法读取内容：{0}", tError(e))); }
     finally { if (generation === loadGeneration.current) setLoading(false); }
   };
-  useEffect(() => { autoSavePaused.current = false; setAutoSaved(false); setData({ materials: [], articles: [], tags: [] }); setMaterial(null); setViewedMaterial(null); setArticle(null); setArticleUndo(null); setCalendarArticleId(null); setSelected([]); setDiscoverQuery(''); void load(); return () => { loadGeneration.current++; }; }, [root, desktop]);
+  useEffect(() => { parkedArticles.current.clear(); articleEditor.current = ''; autoSavePaused.current = false; setAutoSaved(false); setData({ materials: [], articles: [], tags: [] }); setMaterial(null); setViewedMaterial(null); setArticle(null); setArticleUndo(null); setCalendarArticleId(null); setSelected([]); setDiscoverQuery(''); void load(); return () => { loadGeneration.current++; }; }, [root, desktop]);
   useEffect(() => {
     const refresh = (event: Event) => { if ((event as CustomEvent<{ root: string }>).detail?.root === root) void load(); };
     window.addEventListener('seabird-content-saved', refresh);
@@ -233,29 +252,33 @@ export default function ContentWorkspace({ view, root, desktop, agentRunning, ag
     if (material && JSON.stringify(material) !== materialSnapshot.current && !window.confirm(t("素材有未保存的修改，确定放弃吗？"))) return;
     setMaterial(null); materialSnapshot.current = ''; setViewedMaterial(item); setError(''); onNavigate('materials');
   };
-  const editArticle = (item: Article, startEditing = item.id === 0, beforeOpen?: () => boolean) => { if (article && JSON.stringify(article) !== articleSnapshot.current && !window.confirm(t("文章有未保存的修改，确定放弃吗？"))) return false; if (beforeOpen && !beforeOpen()) return false; editorEpoch.current++; autoSavePaused.current = false; setAutoSaved(false); setArticleUndo(null); setArticleEditing(startEditing); articleSnapshot.current = JSON.stringify(item); setArticle(structuredClone(item)); setError(''); onNavigate('articles'); return true; };
+  const editArticle = (item: Article, startEditing = item.id === 0, beforeOpen?: () => boolean) => { if (article && JSON.stringify(article) !== articleSnapshot.current && !window.confirm(t("文章有未保存的修改，确定放弃吗？"))) return false; if (beforeOpen && !beforeOpen()) return false; if (article && articleEditor.current && parkedArticles.current.has(articleEditor.current)) parkedArticles.current.set(articleEditor.current, JSON.parse(articleSnapshot.current)); editorEpoch.current++; articleEditor.current = `${editorSession.current}:${editorEpoch.current}`; autoSavePaused.current = false; setAutoSaved(false); setArticleUndo(null); setArticleEditing(startEditing); articleSnapshot.current = JSON.stringify(item); setArticle(structuredClone(item)); setError(''); onNavigate('articles'); return true; };
   const writeFromMaterials = (items: Material[]) => {
     editArticle(emptyArticle(items.map(item => item.id)), true, () => onReferenceMaterials(items));
   };
   const undoAgentEdit = () => {
     const current = liveEditor.current;
-    if (!articleUndo || !current.article || current.view !== 'articles' || current.root !== articleUndo.root || articleUndo.editor !== `${editorSession.current}:${editorEpoch.current}`) return;
+    if (!articleUndo || !current.article || current.view !== 'articles' || current.root !== articleUndo.root || articleUndo.editor !== articleEditor.current) return;
     const restored = undoArticleEdit(articleUndo.before, articleUndo.after, current.article);
     if (!restored) { setMessage(''); setError(t("文章在应用后又有修改，无法直接撤销。请手动调整，或先复制当前内容。")); return; }
     liveEditor.current.article = restored; setArticle(restored); setArticleUndo(null); articleUndo.onUndo(); setError(''); setMessage(t("已撤销 Agent 修改，请保存文章"));
   };
   const closeEditor = () => {
     if (dirty && !window.confirm(t("有未保存的修改，确定放弃吗？"))) return;
+    if (view === 'articles' && article && articleEditor.current && parkedArticles.current.has(articleEditor.current)) parkedArticles.current.set(articleEditor.current, JSON.parse(articleSnapshot.current));
     editorEpoch.current++;
+    if (view === 'articles') articleEditor.current = '';
     if (view === 'materials') { setMaterial(null); materialSnapshot.current = ''; }
     else { setArticle(null); setArticleUndo(null); articleSnapshot.current = ''; }
   };
   const saveCurrent = async () => {
     if (!edit || saving || savingRef.current || autoSavingRef.current) return;
     savingRef.current = true; setSaving(true); setError('');
+    const savedEditor = articleEditor.current;
     try {
       const kind = view === 'materials' ? 'material' : 'article';
       const result = await saveItem(kind, edit);
+      if (kind === 'article' && edit.id === 0) onDraftSaved(root, savedEditor, result.id);
       const fresh = await load();
       const updated = (kind === 'material' ? fresh?.materials.find(x => x.id === result.id) : fresh?.articles.find(x => x.id === result.id)) || { ...edit, id: result.id };
       if (kind === 'material') { materialSnapshot.current = JSON.stringify(updated); setMaterial(updated as Material); }
@@ -368,7 +391,7 @@ export default function ContentWorkspace({ view, root, desktop, agentRunning, ag
     if (current && JSON.stringify(current) !== snapshot && !window.confirm(kind === 'articles' ? t('文章有未保存的修改，确定放弃吗？') : t('素材有未保存的修改，确定放弃吗？'))) return;
     if (!onAgent(kind === 'articles' ? t('写一篇文章，参考：') : t('添加一个素材，参考：'), undefined, undefined, true, true)) return;
     editorEpoch.current++;
-    if (kind === 'articles') { setArticle(null); setArticleUndo(null); articleSnapshot.current = ''; }
+    if (kind === 'articles') { if (article && articleEditor.current && parkedArticles.current.has(articleEditor.current)) parkedArticles.current.set(articleEditor.current, JSON.parse(articleSnapshot.current)); articleEditor.current = ''; setArticle(null); setArticleUndo(null); articleSnapshot.current = ''; }
     else { setMaterial(null); setViewedMaterial(null); materialSnapshot.current = ''; }
     onNavigate(kind);
   };

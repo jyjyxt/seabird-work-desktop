@@ -2,13 +2,14 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { canAutoSaveArticle, isSavedArticle, mergeSavedArticle, startArticleAutoSave } from '../src/articleAutoSave.ts';
 
-const article = { id: 1, title: 'Title', body: 'Original', tags: 'tag', versions: { b: { title: 'B', body: 'b' }, a: { title: 'A', body: 'a' } }, material_ids: [2, 1], updated_at: 'before' };
+const article = { id: 1, title: 'Title', body: 'Original', tags: 'tag', versions: { b: { title: 'B', body: 'b' }, a: { title: 'A', body: 'a' } }, material_ids: [2, 1], cover: null, updated_at: 'before' };
 
 test('recognizes saved content despite database normalization and detects a later change', () => {
   const submitted = { ...article, title: ' Title ' };
   const saved = { ...article, versions: { a: article.versions.a, b: article.versions.b }, material_ids: [1, 2], updated_at: 'after' };
   assert.equal(isSavedArticle(submitted, saved, true), true);
   assert.equal(isSavedArticle(submitted, { ...saved, body: 'External edit' }, true), false);
+  assert.equal(isSavedArticle(submitted, { ...saved, cover: { path: '/image.png', name: 'image.png', kind: 'image' } }, true), false);
 });
 
 test('keeps edits made during saving while updating the saved timestamp', () => {

@@ -81,6 +81,8 @@ pub struct Article {
     pub tags: String,
     pub versions: BTreeMap<String, Version>,
     pub material_ids: Vec<i64>,
+    #[serde(default)]
+    pub cover: Option<MediaFile>,
     pub updated_at: String,
 }
 #[derive(Serialize)]
@@ -110,7 +112,7 @@ fn init(conn: &Connection) -> Result<(), String> {
         CREATE TABLE IF NOT EXISTS content_materials (id INTEGER PRIMARY KEY, root TEXT NOT NULL, title TEXT NOT NULL, source TEXT NOT NULL DEFAULT '', url TEXT NOT NULL DEFAULT '', note TEXT NOT NULL DEFAULT '', tags TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
         CREATE INDEX IF NOT EXISTS content_materials_root ON content_materials(root);
         CREATE TABLE IF NOT EXISTS content_material_media (material_id INTEGER NOT NULL REFERENCES content_materials(id) ON DELETE CASCADE, path TEXT NOT NULL, name TEXT NOT NULL, kind TEXT NOT NULL, PRIMARY KEY(material_id,path));
-        CREATE TABLE IF NOT EXISTS content_articles (id INTEGER PRIMARY KEY, root TEXT NOT NULL, title TEXT NOT NULL, body TEXT NOT NULL DEFAULT '', versions TEXT NOT NULL DEFAULT '{}', tags TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+        CREATE TABLE IF NOT EXISTS content_articles (id INTEGER PRIMARY KEY, root TEXT NOT NULL, title TEXT NOT NULL, body TEXT NOT NULL DEFAULT '', versions TEXT NOT NULL DEFAULT '{}', tags TEXT NOT NULL DEFAULT '', cover TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
         CREATE INDEX IF NOT EXISTS content_articles_root ON content_articles(root);
         CREATE TABLE IF NOT EXISTS content_article_materials (article_id INTEGER NOT NULL REFERENCES content_articles(id) ON DELETE CASCADE, material_id INTEGER NOT NULL REFERENCES content_materials(id) ON DELETE CASCADE, PRIMARY KEY(article_id, material_id));
         CREATE TABLE IF NOT EXISTS content_publications (id INTEGER PRIMARY KEY, root TEXT NOT NULL, article_id INTEGER NOT NULL REFERENCES content_articles(id) ON DELETE CASCADE, article_title TEXT NOT NULL, published_at INTEGER NOT NULL);
@@ -120,7 +122,7 @@ fn init(conn: &Connection) -> Result<(), String> {
         CREATE TRIGGER IF NOT EXISTS content_material_suggestion_delete AFTER DELETE ON content_materials BEGIN DELETE FROM content_suggestion_saves WHERE root=OLD.root AND kind='material' AND content_id=OLD.id; END;
         CREATE TRIGGER IF NOT EXISTS content_article_suggestion_delete AFTER DELETE ON content_articles BEGIN DELETE FROM content_suggestion_saves WHERE root=OLD.root AND kind='article' AND content_id=OLD.id; END;")
         .map_err(|e| e.to_string())?;
-    let has_tags = || -> Result<bool, String> {
+    let has_column = |column: &str| -> Result<bool, String> {
         let mut stmt = conn
             .prepare("PRAGMA table_info(content_articles)")
             .map_err(|e| e.to_string())?;
@@ -128,20 +130,30 @@ fn init(conn: &Connection) -> Result<(), String> {
             .query_map([], |row| row.get::<_, String>(1))
             .map_err(|e| e.to_string())?;
         for name in names {
-            if name.map_err(|e| e.to_string())? == "tags" {
+            if name.map_err(|e| e.to_string())? == column {
                 return Ok(true);
             }
         }
         Ok(false)
     };
-    if !has_tags()? {
+    if !has_column("tags")? {
         if let Err(error) = conn.execute(
             "ALTER TABLE content_articles ADD COLUMN tags TEXT NOT NULL DEFAULT ''",
             [],
         ) {
             // Another connection may have completed the same migration concurrently.
-            if !has_tags()? {
+            if !has_column("tags")? {
                 return Err(format!("文章标签迁移失败：{error}"));
+            }
+        }
+    }
+    if !has_column("cover")? {
+        if let Err(error) = conn.execute(
+            "ALTER TABLE content_articles ADD COLUMN cover TEXT NOT NULL DEFAULT ''",
+            [],
+        ) {
+            if !has_column("cover")? {
+                return Err(format!("文章封面迁移失败：{error}"));
             }
         }
     }
@@ -230,7 +242,7 @@ fn load(conn: &Connection, root: &str) -> Result<ContentData, String> {
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| e.to_string())?;
     }
-    let mut statement = conn.prepare("SELECT id,title,body,versions,tags,updated_at FROM content_articles WHERE root=?1 ORDER BY updated_at DESC,id DESC").map_err(|e| e.to_string())?;
+    let mut statement = conn.prepare("SELECT id,title,body,versions,tags,updated_at,cover FROM content_articles WHERE root=?1 ORDER BY updated_at DESC,id DESC").map_err(|e| e.to_string())?;
     let rows = statement
         .query_map([root], |r| {
             Ok((
@@ -240,12 +252,14 @@ fn load(conn: &Connection, root: &str) -> Result<ContentData, String> {
                 r.get::<_, String>(3)?,
                 r.get::<_, String>(4)?,
                 r.get::<_, String>(5)?,
+                r.get::<_, String>(6)?,
             ))
         })
         .map_err(|e| e.to_string())?;
     let mut articles = Vec::new();
     for row in rows {
-        let (id, title, body, versions, tags, updated_at) = row.map_err(|e| e.to_string())?;
+        let (id, title, body, versions, tags, updated_at, cover) =
+            row.map_err(|e| e.to_string())?;
         let mut links = conn.prepare("SELECT material_id FROM content_article_materials WHERE article_id=?1 ORDER BY material_id").map_err(|e| e.to_string())?;
         let material_ids = links
             .query_map([id], |r| r.get(0))
@@ -260,6 +274,11 @@ fn load(conn: &Connection, root: &str) -> Result<ContentData, String> {
             versions: serde_json::from_str(&versions)
                 .map_err(|e| format!("文章平台版本读取失败：{e}"))?,
             material_ids,
+            cover: if cover.is_empty() {
+                None
+            } else {
+                Some(serde_json::from_str(&cover).map_err(|e| format!("文章封面读取失败：{e}"))?)
+            },
             updated_at,
         });
     }
@@ -375,6 +394,19 @@ fn save_article_with_key(
     if item.title.trim().is_empty() {
         return Err("请输入文章标题".into());
     }
+    let cover = if let Some(cover) = &item.cover {
+        let media_dir = std::path::Path::new(root).join("seabird-media");
+        let path = std::path::Path::new(&cover.path);
+        if path.parent() != Some(media_dir.as_path())
+            || cover.kind != "image"
+            || cover.name.len() > 4096
+        {
+            return Err("文章封面路径无效，请先导入图片".into());
+        }
+        serde_json::to_string(cover).map_err(|e| e.to_string())?
+    } else {
+        String::new()
+    };
     let versions = serde_json::to_string(&item.versions).map_err(|e| e.to_string())?;
     if item.title.len() > 2000
         || item.body.len() > 2_000_000
@@ -401,13 +433,13 @@ fn save_article_with_key(
     }
     let id = if item.id == 0 {
         tx.execute(
-            "INSERT INTO content_articles(root,title,body,versions,tags) VALUES (?1,?2,?3,?4,?5)",
-            params![root, item.title.trim(), item.body, versions, item.tags],
+            "INSERT INTO content_articles(root,title,body,versions,tags,cover) VALUES (?1,?2,?3,?4,?5,?6)",
+            params![root, item.title.trim(), item.body, versions, item.tags, cover],
         )
         .map_err(|e| e.to_string())?;
         tx.last_insert_rowid()
     } else {
-        let n=tx.execute("UPDATE content_articles SET title=?1,body=?2,versions=?3,tags=?4,updated_at=CURRENT_TIMESTAMP WHERE id=?5 AND root=?6",params![item.title.trim(),item.body,versions,item.tags,item.id,root]).map_err(|e|e.to_string())?;
+        let n=tx.execute("UPDATE content_articles SET title=?1,body=?2,versions=?3,tags=?4,cover=?5,updated_at=CURRENT_TIMESTAMP WHERE id=?6 AND root=?7",params![item.title.trim(),item.body,versions,item.tags,cover,item.id,root]).map_err(|e|e.to_string())?;
         if n == 0 {
             return Err("文章不存在或不属于当前工作目录".into());
         }
@@ -1303,6 +1335,7 @@ mod tests {
             tags: String::new(),
             versions: BTreeMap::new(),
             material_ids: vec![],
+            cover: None,
             updated_at: String::new(),
         };
         article.id = save_article(&mut db, "/one", &article).unwrap();
@@ -1364,6 +1397,7 @@ mod tests {
             tags: String::new(),
             versions: BTreeMap::new(),
             material_ids: vec![],
+            cover: None,
             updated_at: String::new(),
         };
         let first = save_material_with_key(&mut db, "/one", &material, None, Some(&key)).unwrap();
@@ -1424,6 +1458,33 @@ mod tests {
         assert!(save_article_checked(&mut db, "/workspace", &stale, Some(&original)).is_err());
         init(&db).unwrap();
         assert_eq!(load(&db, "/workspace").unwrap().articles.len(), 1);
+    }
+    #[test]
+    fn article_cover_migrates_round_trips_and_guards_conflicts() {
+        let mut db = Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE content_articles (id INTEGER PRIMARY KEY, root TEXT NOT NULL, title TEXT NOT NULL, body TEXT NOT NULL DEFAULT '', versions TEXT NOT NULL DEFAULT '{}', updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP); INSERT INTO content_articles(root,title) VALUES('/workspace','旧文章');").unwrap();
+        let original = load(&db, "/workspace").unwrap().articles.remove(0);
+        assert_eq!(original.cover, None);
+        let mut updated = original.clone();
+        updated.cover = Some(MediaFile {
+            path: "/workspace/seabird-media/cover.png".into(),
+            name: "cover.png".into(),
+            kind: "image".into(),
+        });
+        save_article_checked(&mut db, "/workspace", &updated, Some(&original)).unwrap();
+        let saved = load(&db, "/workspace").unwrap().articles.remove(0);
+        assert_eq!(saved.cover, updated.cover);
+        assert!(save_article_checked(&mut db, "/workspace", &original, Some(&original)).is_err());
+        let mut invalid = saved.clone();
+        invalid.cover.as_mut().unwrap().path = "/other/cover.png".into();
+        assert!(save_article_checked(&mut db, "/workspace", &invalid, Some(&saved)).is_err());
+        invalid.cover.as_mut().unwrap().path = "/workspace/seabird-media/cover.mp4".into();
+        invalid.cover.as_mut().unwrap().kind = "video".into();
+        assert!(save_article_checked(&mut db, "/workspace", &invalid, Some(&saved)).is_err());
+        let mut removed = saved.clone();
+        removed.cover = None;
+        save_article_checked(&mut db, "/workspace", &removed, Some(&saved)).unwrap();
+        assert_eq!(load(&db, "/workspace").unwrap().articles[0].cover, None);
     }
     #[test]
     fn agent_content_roundtrip_guards_concurrent_edits_and_preserves_links() {
@@ -1587,6 +1648,7 @@ mod tests {
             body: "原稿".into(),
             versions,
             material_ids: vec![mid],
+            cover: None,
             updated_at: String::new(),
         };
         let aid = save_article(&mut db, "/one", &a).unwrap();

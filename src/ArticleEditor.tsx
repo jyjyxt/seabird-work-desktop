@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from 'react';
 import { convertFileSrc, invoke } from '@tauri-apps/api/core';
 import { open } from '@tauri-apps/plugin-dialog';
 import { Heading2, Heading3, ImagePlus, Sparkles, Video } from 'lucide-react';
-import { articleHtml, articleMarkdown, mediaFileUrl } from './articleFormat';
+import { articleHtml, articleMarkdown, articleMediaLink, mediaFileUrl } from './articleFormat';
 
 type MediaFile = { path: string; name: string; kind: 'image' | 'video' };
 type Props = { root: string; desktop: boolean; title: string; body: string; preview: boolean; onTitle: (value: string) => void; onBody: (value: string) => void; onBusy: (busy: boolean) => void; onMessage: (value: string) => void; onError: (value: string) => void; onOpenLink: (url: string) => void; isCurrent: () => boolean; onEditSelection: (selection: { start: number; end: number; text: string }, body: string) => void };
@@ -14,7 +14,10 @@ export default function ArticleEditor({ root, desktop, title, body, preview, onT
   const currentBody = useRef(body);
   currentBody.current = body;
   const [hasSelection, setHasSelection] = useState(false);
-  useEffect(() => { if (preview) setHasSelection(false); }, [preview]);
+  const [mediaPicker, setMediaPicker] = useState<{ kind: 'image' | 'video'; range: { start: number; end: number }; body: string } | null>(null);
+  const [mediaUrl, setMediaUrl] = useState('');
+  const [mediaError, setMediaError] = useState('');
+  useEffect(() => { if (preview) { setHasSelection(false); setMediaPicker(null); setMediaError(''); } }, [preview]);
   const selection = () => ({ start: input.current?.selectionStart ?? currentBody.current.length, end: input.current?.selectionEnd ?? currentBody.current.length });
   const insert = (text: string, range = selection(), block = false) => {
     const value = currentBody.current;
@@ -34,18 +37,32 @@ export default function ArticleEditor({ root, desktop, title, body, preview, onT
     const line = value.slice(start, end).replace(/^#{1,6}\s+/, '');
     insert(`${'#'.repeat(level)} ${line}`, { start, end });
   };
-  const importFile = async (kind: 'image' | 'video') => {
-    if (!desktop) { onError(t("请在桌面应用中添加图片和视频。")); return; }
-    const range = selection();
+  const openMediaPicker = (kind: 'image' | 'video') => {
+    setMediaPicker({ kind, range: selection(), body: currentBody.current });
+    setMediaUrl(''); setMediaError('');
+  };
+  const insertMediaUrl = () => {
+    if (!mediaPicker) return;
+    const markdown = articleMediaLink(mediaPicker.kind, mediaUrl);
+    if (!markdown) { setMediaError(t("请输入有效的 HTTP 或 HTTPS 链接。")); return; }
+    if (currentBody.current !== mediaPicker.body) { setMediaError(t("文章内容已改变，请重新选择插入位置。")); return; }
+    insert(markdown, mediaPicker.range, true); setMediaPicker(null); setMediaError('');
+  };
+  const importFile = async () => {
+    if (!mediaPicker) return;
+    if (!desktop) { setMediaError(t("请在桌面应用中添加图片和视频。")); return; }
+    const { kind, range, body: originalBody } = mediaPicker;
     onBusy(true);
     try {
       const path = await open({ multiple: false, filters: [{ name: kind === 'image' ? t("图片") : t("视频"), extensions: kind === 'image' ? ['jpg', 'jpeg', 'png', 'gif', 'webp', 'avif'] : ['mp4', 'mov', 'm4v', 'webm'] }] });
       if (typeof path !== 'string' || !isCurrent()) return;
       const media = await invoke<MediaFile>('content_import_media', { root, path });
       if (!isCurrent()) { onError(t("文件已导入，但文章已切换，请重新插入。")); return; }
+      if (currentBody.current !== originalBody) { setMediaError(t("文章内容已改变，请重新选择插入位置。")); return; }
       const url = mediaFileUrl(media.path);
       const label = media.name.replace(/[\r\n]+/g, ' ').replace(/[\[\]\\]/g, '\\$&');
       insert(media.kind === 'image' ? `![${label}](<${url}>)` : `<video controls src="${url}"></video>`, range, true);
+      setMediaPicker(null); setMediaError('');
       onMessage(t("文件已添加，请保存文章"));
     } catch (error) { onError(t("添加文件失败：{0}", tError(error))); }
     finally { onBusy(false); }
@@ -66,13 +83,18 @@ export default function ArticleEditor({ root, desktop, title, body, preview, onT
     <div className="article-editor-toolbar" role="toolbar" aria-label={t("文章编辑工具")}>
       {!preview && <><button type="button" onMouseDown={e => e.preventDefault()} onClick={() => heading(2)} title={t("二级标题")}><Heading2 size={16}/> {t("标题")}</button>
       <button type="button" onMouseDown={e => e.preventDefault()} onClick={() => heading(3)} title={t("三级标题")}><Heading3 size={16}/> {t("小标题")}</button>
-      <button type="button" onMouseDown={e => e.preventDefault()} onClick={() => void importFile('image')}><ImagePlus size={16}/> {t("图片")}</button>
-      <button type="button" onMouseDown={e => e.preventDefault()} onClick={() => void importFile('video')}><Video size={16}/> {t("视频")}</button>
+      <button type="button" onMouseDown={e => e.preventDefault()} onClick={() => openMediaPicker('image')}><ImagePlus size={16}/> {t("图片")}</button>
+      <button type="button" onMouseDown={e => e.preventDefault()} onClick={() => openMediaPicker('video')}><Video size={16}/> {t("视频")}</button>
       <button type="button" onMouseDown={e => e.preventDefault()} disabled={!hasSelection} onClick={() => { const range = selection(); const text = currentBody.current.slice(range.start, range.end); if (text) onEditSelection({ ...range, text }, currentBody.current); }}><Sparkles size={16}/> {t("修改选中内容")}</button></>}
       <span className="article-editor-spacer"/>
       <button type="button" onClick={() => void copy('markdown')}>{t("复制 Markdown")}</button>
       <button type="button" onClick={() => void copy('html')}>{t("复制 HTML")}</button>
     </div>
+    {!preview && mediaPicker && <form className="article-media-picker" onSubmit={event => { event.preventDefault(); insertMediaUrl(); }} onKeyDown={event => { if (event.key === 'Escape') { event.preventDefault(); setMediaPicker(null); input.current?.focus(); } }}>
+      <div className="article-media-picker-heading"><b>{mediaPicker.kind === 'image' ? t("插入图片") : t("插入视频")}</b><button type="button" className="content-link" onClick={() => { setMediaPicker(null); input.current?.focus(); }}>{t("取消")}</button></div>
+      <div className="article-media-picker-controls"><input autoFocus type="url" aria-label={mediaPicker.kind === 'image' ? t("图片链接") : t("视频链接")} placeholder="https://" value={mediaUrl} onChange={event => { setMediaUrl(event.target.value); setMediaError(''); }}/><button type="submit" className="content-primary">{t("插入链接")}</button><button type="button" className="content-soft" onClick={() => void importFile()}>{t("选择本地文件")}</button></div>
+      {mediaPicker.kind === 'video' && <p>{t("请输入视频文件直链，例如 MP4 链接。")}</p>}{mediaError && <p className="article-media-picker-error" role="alert">{mediaError}</p>}
+    </form>}
     {preview ? <div className="article-preview" onClick={e => { const link = (e.target as HTMLElement).closest('a'); if (!link) return; e.preventDefault(); const href = link.getAttribute('href') || ''; if (/^https?:\/\//i.test(href)) onOpenLink(href); }} dangerouslySetInnerHTML={{ __html: articleHtml('', body, previewFile) }}/> : <textarea ref={input} className="content-body-input" aria-label={t("文章正文")} placeholder={t("写下你的想法……")} value={body} onSelect={e => setHasSelection(e.currentTarget.selectionStart !== e.currentTarget.selectionEnd)} onChange={e => onBody(e.target.value)}/>}
   </>;
 }

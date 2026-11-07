@@ -8,6 +8,18 @@ export function mediaFileUrl(path: string): string {
   return `file://${normalized.startsWith('/') ? '' : '/'}${encoded}`;
 }
 
+export function articleMediaLink(kind: 'image' | 'video', value: string): string | null {
+  const input = value.trim();
+  if (!input || /[\u0000-\u001f\u007f]/.test(input)) return null;
+  try {
+    const url = new URL(input);
+    if (!['http:', 'https:'].includes(url.protocol) || !url.hostname) return null;
+    return kind === 'image' ? `![](<${url.href}>)` : `<video controls src="${url.href}"></video>`;
+  } catch {
+    return null;
+  }
+}
+
 function safeUrl(url: string, link = false): string {
   try {
     const parsed = new URL(url);

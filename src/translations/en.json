@@ -486,5 +486,19 @@
   "打开图片链接": "Open image link",
   "打开视频链接": "Open video link",
   "\n图片链接：{0}": "\nImage link: {0}",
-  "\n视频链接：{0}": "\nVideo link: {0}"
+  "\n视频链接：{0}": "\nVideo link: {0}",
+  "用素材 {0} 写文章": "Write an article using {0}",
+  "查看全部标签": "View all tags",
+  "全部标签": "All tags",
+  "排序": "Sort by",
+  "字母顺序": "Alphabetical",
+  "文章数量": "Article count",
+  "素材数量": "Material count",
+  "{0} 篇文章 · {1} 条素材": "{0} articles · {1} materials",
+  "标签类型": "Tag type",
+  "素材标签": "Material tags",
+  "{0} 篇文章": "{0} articles",
+  "{0} 条素材": "{0} materials",
+  "暂无标签": "No tags yet",
+  "数据库备份最多每 5 分钟更新一次，可能落后于最后一次保存。备份不包含图片和视频，请另行备份素材目录。": "Database backups update at most once every 5 minutes and may be older than your last save. Images and videos are not included; back up the content folder separately."
 }

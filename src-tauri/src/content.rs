@@ -93,6 +93,13 @@ pub struct Article {
 pub struct ContentData {
     materials: Vec<Material>,
     articles: Vec<Article>,
+    tags: Vec<ContentTag>,
+}
+#[derive(Debug, Serialize)]
+struct ContentTag {
+    kind: String,
+    name: String,
+    count: i64,
 }
 #[derive(Serialize)]
 pub struct SaveResult {
@@ -163,6 +170,7 @@ fn init(conn: &Connection) -> Result<(), String> {
             ),
         ],
     )?;
+    migrate_tags(conn)?;
     Ok(())
 }
 
@@ -248,6 +256,97 @@ fn record_suggestion(
     }
     Ok(())
 }
+// The original tag strings remain the content source of truth; this table stores
+// per-workspace, per-kind counts and is updated in the same transaction as edits.
+fn parse_tags(value: &str) -> HashMap<String, String> {
+    let mut tags = HashMap::new();
+    for tag in value
+        .split([',', '，', '\r', '\n'])
+        .map(str::trim)
+        .filter(|tag| !tag.is_empty())
+    {
+        tags.insert(tag.to_lowercase(), tag.to_string());
+    }
+    tags
+}
+
+fn update_tag_counts(
+    conn: &Connection,
+    root: &str,
+    kind: &str,
+    before: &str,
+    after: &str,
+) -> Result<(), String> {
+    let old = parse_tags(before);
+    let new = parse_tags(after);
+    for key in old.keys().filter(|key| !new.contains_key(*key)) {
+        conn.execute(
+            "DELETE FROM content_tags WHERE root=?1 AND kind=?2 AND tag_key=?3 AND count=1",
+            params![root, kind, key],
+        )
+        .map_err(|e| e.to_string())?;
+        conn.execute("UPDATE content_tags SET count=count-1 WHERE root=?1 AND kind=?2 AND tag_key=?3 AND count>1", params![root, kind, key]).map_err(|e| e.to_string())?;
+    }
+    for (key, name) in new.iter().filter(|(key, _)| !old.contains_key(*key)) {
+        conn.execute("INSERT INTO content_tags(root,kind,tag_key,name,count) VALUES(?1,?2,?3,?4,1) ON CONFLICT(root,kind,tag_key) DO UPDATE SET count=count+1", params![root, kind, key, name]).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+fn migrate_tags(conn: &Connection) -> Result<(), String> {
+    let exists = |db: &Connection| {
+        db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='content_tags')",
+            [],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(|e| e.to_string())
+    };
+    if exists(conn)? {
+        return Ok(());
+    }
+    let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| e.to_string())?;
+    if !exists(&tx)? {
+        tx.execute_batch("CREATE TABLE content_tags (root TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('article','material')), tag_key TEXT NOT NULL, name TEXT NOT NULL, count INTEGER NOT NULL CHECK(count > 0), PRIMARY KEY(root,kind,tag_key));").map_err(|e| e.to_string())?;
+        for (table, kind) in [
+            ("content_materials", "material"),
+            ("content_articles", "article"),
+        ] {
+            let mut statement = tx
+                .prepare(&format!("SELECT root,tags FROM {table} WHERE tags<>''"))
+                .map_err(|e| e.to_string())?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(|e| e.to_string())?;
+            for row in rows {
+                let (root, tags) = row.map_err(|e| e.to_string())?;
+                update_tag_counts(&tx, &root, kind, "", &tags)?;
+            }
+        }
+    }
+    tx.commit().map_err(|e| e.to_string())
+}
+
+fn load_tags(conn: &Connection, root: &str) -> Result<Vec<ContentTag>, String> {
+    let mut statement = conn
+        .prepare("SELECT kind,name,count FROM content_tags WHERE root=?1")
+        .map_err(|e| e.to_string())?;
+    let tags = statement
+        .query_map([root], |row| {
+            Ok(ContentTag {
+                kind: row.get(0)?,
+                name: row.get(1)?,
+                count: row.get(2)?,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+    tags.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())
+}
+
 fn load_materials(conn: &Connection, root: &str, id: Option<i64>) -> Result<Vec<Material>, String> {
     let sql = if id.is_some() {
         "SELECT id,title,source,url,note,tags,updated_at,image_url,video_url FROM content_materials WHERE root=?1 AND id=?2"
@@ -376,6 +475,7 @@ fn load(conn: &Connection, root: &str) -> Result<ContentData, String> {
     Ok(ContentData {
         materials: load_materials(conn, root, None)?,
         articles: load_articles(conn, root, None)?,
+        tags: load_tags(conn, root)?,
     })
 }
 #[cfg(test)]
@@ -430,6 +530,18 @@ fn save_material_with_key(
             return Err("素材已被修改，请重新读取后再保存".into());
         }
     }
+    let previous_tags = if item.id == 0 {
+        String::new()
+    } else {
+        tx.query_row(
+            "SELECT tags FROM content_materials WHERE id=?1 AND root=?2",
+            params![item.id, root],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?
+        .unwrap_or_default()
+    };
     let id = if item.id == 0 {
         tx.execute("INSERT INTO content_materials(root,title,source,url,note,tags,image_url,video_url) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",params![root,item.title.trim(),item.source,item.url,item.note,item.tags,item.image_url,item.video_url]).map_err(|e|e.to_string())?;
         tx.last_insert_rowid()
@@ -460,6 +572,7 @@ fn save_material_with_key(
         )
         .map_err(|e| e.to_string())?;
     }
+    update_tag_counts(&tx, root, "material", &previous_tags, &item.tags)?;
     record_suggestion(&tx, root, "material", key, id)?;
     tx.commit().map_err(|e| e.to_string())?;
     Ok(id)
@@ -524,6 +637,18 @@ fn save_article_with_key(
             return Err("文章已被修改，请重新读取后再保存".into());
         }
     }
+    let previous_tags = if item.id == 0 {
+        String::new()
+    } else {
+        tx.query_row(
+            "SELECT tags FROM content_articles WHERE id=?1 AND root=?2",
+            params![item.id, root],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?
+        .unwrap_or_default()
+    };
     let id = if item.id == 0 {
         tx.execute(
             "INSERT INTO content_articles(root,title,body,versions,tags,cover) VALUES (?1,?2,?3,?4,?5,?6)",
@@ -562,6 +687,7 @@ fn save_article_with_key(
         )
         .map_err(|e| e.to_string())?;
     }
+    update_tag_counts(&tx, root, "article", &previous_tags, &item.tags)?;
     record_suggestion(&tx, root, "article", key, id)?;
     tx.commit().map_err(|e| e.to_string())?;
     Ok(id)
@@ -846,7 +972,7 @@ pub fn social_platform_save(
     let id = save_platform(&conn, &item)?;
     Ok(SaveResult {
         id,
-        backup_warning: crate::backup_database(&app, &conn, false, false).err(),
+        backup_warning: crate::backup_database(&app, &conn, true, false).err(),
     })
 }
 
@@ -897,7 +1023,7 @@ pub fn social_platform_set_enabled(
 ) -> Result<Option<String>, String> {
     let conn = crate::database(&app)?;
     set_platform_enabled(&conn, id, enabled)?;
-    Ok(crate::backup_database(&app, &conn, false, false).err())
+    Ok(crate::backup_database(&app, &conn, true, false).err())
 }
 
 fn set_platforms_enabled(conn: &Connection, ids: &[i64], enabled: bool) -> Result<(), String> {
@@ -918,7 +1044,7 @@ pub fn social_platforms_set_enabled(
 ) -> Result<Option<String>, String> {
     let conn = crate::database(&app)?;
     set_platforms_enabled(&conn, &ids, enabled)?;
-    Ok(crate::backup_database(&app, &conn, false, false).err())
+    Ok(crate::backup_database(&app, &conn, true, false).err())
 }
 
 #[tauri::command]
@@ -1022,7 +1148,7 @@ pub fn publication_save(
     let id = save_publication(&mut conn, &root.to_string_lossy(), &item, expected.as_ref())?;
     Ok(SaveResult {
         id,
-        backup_warning: crate::backup_database(&app, &conn, false, false).err(),
+        backup_warning: crate::backup_database(&app, &conn, true, false).err(),
     })
 }
 
@@ -1058,19 +1184,28 @@ fn delete_publication(conn: &Connection, root: &str, id: i64) -> Result<(), Stri
 
 fn delete(conn: &Connection, root: &str, kind: &str, id: i64) -> Result<(), String> {
     init(conn)?;
-    let sql = match kind {
-        "material" => "DELETE FROM content_materials WHERE id=?1 AND root=?2",
-        "article" => "DELETE FROM content_articles WHERE id=?1 AND root=?2",
+    let (select, delete) = match kind {
+        "material" => (
+            "SELECT tags FROM content_materials WHERE id=?1 AND root=?2",
+            "DELETE FROM content_materials WHERE id=?1 AND root=?2",
+        ),
+        "article" => (
+            "SELECT tags FROM content_articles WHERE id=?1 AND root=?2",
+            "DELETE FROM content_articles WHERE id=?1 AND root=?2",
+        ),
         _ => return Err("未知内容类型".into()),
     };
-    if conn
-        .execute(sql, params![id, root])
+    let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| e.to_string())?;
+    let tags: String = tx
+        .query_row(select, params![id, root], |row| row.get(0))
+        .optional()
         .map_err(|e| e.to_string())?
-        == 0
-    {
-        return Err("内容不存在或不属于当前工作目录".into());
-    }
-    Ok(())
+        .ok_or("内容不存在或不属于当前工作目录")?;
+    tx.execute(delete, params![id, root])
+        .map_err(|e| e.to_string())?;
+    update_tag_counts(&tx, root, kind, &tags, "")?;
+    tx.commit().map_err(|e| e.to_string())
 }
 #[tauri::command]
 pub fn content_load(app: tauri::AppHandle, root: String) -> Result<ContentData, String> {
@@ -1104,7 +1239,7 @@ pub fn content_save_material(
         expected.as_ref(),
         suggestion_key.as_deref(),
     )?;
-    let backup_warning = crate::backup_database(&app, &conn, false, false).err();
+    let backup_warning = crate::backup_database(&app, &conn, true, false).err();
     Ok(SaveResult { id, backup_warning })
 }
 
@@ -1203,7 +1338,7 @@ pub fn content_save_article(
         expected.as_ref(),
         suggestion_key.as_deref(),
     )?;
-    let backup_warning = crate::backup_database(&app, &conn, false, false).err();
+    let backup_warning = crate::backup_database(&app, &conn, true, false).err();
     Ok(SaveResult { id, backup_warning })
 }
 #[tauri::command]
@@ -1278,7 +1413,7 @@ fn cli_content_at(
         }
         _ => return Err("未知内容操作".into()),
     };
-    let warning = crate::backup::database(&conn, dir, false, false).err();
+    let warning = crate::backup::database(&conn, dir, true, false).err();
     Ok(serde_json::json!({"id":id,"backup_warning":warning}))
 }
 
@@ -1531,6 +1666,68 @@ mod tests {
         ] {
             assert!(source_url(invalid).is_err(), "{invalid}");
         }
+    }
+
+    #[test]
+    fn typed_tag_counts_migrate_and_follow_content_transactions() {
+        let mut db = Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE content_materials (id INTEGER PRIMARY KEY, root TEXT NOT NULL, title TEXT NOT NULL, source TEXT NOT NULL DEFAULT '', url TEXT NOT NULL DEFAULT '', note TEXT NOT NULL DEFAULT '', tags TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP); CREATE TABLE content_articles (id INTEGER PRIMARY KEY, root TEXT NOT NULL, title TEXT NOT NULL, body TEXT NOT NULL DEFAULT '', versions TEXT NOT NULL DEFAULT '{}', tags TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP); INSERT INTO content_materials(root,title,tags) VALUES('/one','素材一','AI, ai,写作'),('/one','素材二','AI'),('/two','其他','AI'); INSERT INTO content_articles(root,title,tags) VALUES('/one','文章','AI，研究');").unwrap();
+        let summary = |db: &Connection, root: &str| {
+            let mut tags: Vec<_> = load_tags(db, root)
+                .unwrap()
+                .into_iter()
+                .map(|tag| (tag.kind, tag.name.to_lowercase(), tag.count))
+                .collect();
+            tags.sort();
+            tags
+        };
+        let initial = load(&db, "/one").unwrap();
+        assert_eq!(
+            summary(&db, "/one"),
+            vec![
+                ("article".into(), "ai".into(), 1),
+                ("article".into(), "研究".into(), 1),
+                ("material".into(), "ai".into(), 2),
+                ("material".into(), "写作".into(), 1)
+            ]
+        );
+        assert_eq!(
+            summary(&db, "/two"),
+            vec![("material".into(), "ai".into(), 1)]
+        );
+        init(&db).unwrap();
+        assert_eq!(summary(&db, "/one")[2].2, 2);
+
+        let original = initial
+            .materials
+            .iter()
+            .find(|item| item.title == "素材一")
+            .unwrap();
+        let mut changed = original.clone();
+        changed.tags = "写作,新标签".into();
+        save_material_checked(&mut db, "/one", &changed, Some(original)).unwrap();
+        assert_eq!(
+            summary(&db, "/one"),
+            vec![
+                ("article".into(), "ai".into(), 1),
+                ("article".into(), "研究".into(), 1),
+                ("material".into(), "ai".into(), 1),
+                ("material".into(), "写作".into(), 1),
+                ("material".into(), "新标签".into(), 1)
+            ]
+        );
+        assert!(save_material_checked(&mut db, "/one", original, Some(original)).is_err());
+        assert_eq!(summary(&db, "/one")[2].2, 1);
+        delete(&db, "/one", "article", initial.articles[0].id).unwrap();
+        delete(&db, "/one", "material", changed.id).unwrap();
+        assert_eq!(
+            summary(&db, "/one"),
+            vec![("material".into(), "ai".into(), 1)]
+        );
+        assert_eq!(
+            summary(&db, "/two"),
+            vec![("material".into(), "ai".into(), 1)]
+        );
     }
 
     #[test]

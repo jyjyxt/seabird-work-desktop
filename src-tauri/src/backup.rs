@@ -61,7 +61,7 @@ pub fn database(
                 .and_then(|m| m.modified())
                 .ok()
                 .and_then(|t| t.elapsed().ok())
-                .is_some_and(|d| d < Duration::from_secs(60))
+                .is_some_and(|d| d < Duration::from_secs(300))
         {
             return Ok(());
         }
@@ -72,18 +72,6 @@ pub fn database(
             return Err(format!("数据库备份失败：{error}"));
         }
         private_file(&temp)?;
-        let days = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs()
-            / 86400;
-        let daily = dir.join(format!("workbench-day-{days}.sqlite3"));
-        if !daily.exists() {
-            let daily_temp = unique(&dir, "daily-database");
-            fs::copy(&temp, &daily_temp).map_err(|e| e.to_string())?;
-            private_file(&daily_temp)?;
-            fs::rename(&daily_temp, &daily).map_err(|e| e.to_string())?;
-        }
         if preserve {
             let prior = unique(&dir, "before-delete");
             fs::copy(&temp, &prior).map_err(|e| e.to_string())?;
@@ -110,18 +98,6 @@ fn configuration_at(source: &Path, app_dir: &Path) -> Result<(), String> {
         let temp = unique(&dir, "config");
         fs::copy(source, &temp).map_err(|e| e.to_string())?;
         private_file(&temp)?;
-        let days = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs()
-            / 86400;
-        let daily = dir.join(format!("connections-day-{days}.json"));
-        if !daily.exists() {
-            let daily_temp = unique(&dir, "daily-config");
-            fs::copy(&temp, &daily_temp).map_err(|e| e.to_string())?;
-            private_file(&daily_temp)?;
-            fs::rename(&daily_temp, &daily).map_err(|e| e.to_string())?;
-        }
         fs::rename(&temp, dir.join("connections-latest.json")).map_err(|e| e.to_string())?;
         Ok(())
     })
@@ -131,7 +107,7 @@ fn configuration_at(source: &Path, app_dir: &Path) -> Result<(), String> {
 mod tests {
     use super::*;
     #[test]
-    fn snapshots_are_readable_and_keep_an_earlier_daily_copy() {
+    fn snapshots_are_readable_without_daily_copies() {
         let base = std::env::temp_dir().join(format!(
             "seabird-backup-test-{}-{}",
             std::process::id(),
@@ -152,8 +128,17 @@ mod tests {
             .unwrap();
         database(&conn, &app, false, false).unwrap();
         conn.execute("UPDATE data SET value='after'", []).unwrap();
-        database(&conn, &app, false, true).unwrap();
+        database(&conn, &app, true, false).unwrap();
         let dir = base.join("com.seabird.workbench-backups");
+        let throttled = Connection::open(dir.join("workbench-latest.sqlite3")).unwrap();
+        assert_eq!(
+            throttled
+                .query_row("SELECT value FROM data", [], |r| r.get::<_, String>(0))
+                .unwrap(),
+            "before"
+        );
+        drop(throttled);
+        database(&conn, &app, false, true).unwrap();
         assert_eq!(
             fs::read_to_string(dir.join("connections-latest.json")).unwrap(),
             "updated"
@@ -165,22 +150,15 @@ mod tests {
                 .unwrap(),
             "after"
         );
-        let days = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
+        assert!(!fs::read_dir(&dir).unwrap().any(|entry| entry
             .unwrap()
-            .as_secs()
-            / 86400;
-        let daily = Connection::open(dir.join(format!("workbench-day-{days}.sqlite3"))).unwrap();
-        assert_eq!(
-            fs::read_to_string(dir.join(format!("connections-day-{days}.json"))).unwrap(),
-            "original"
-        );
-        assert_eq!(
-            daily
-                .query_row("SELECT value FROM data", [], |r| r.get::<_, String>(0))
-                .unwrap(),
-            "before"
-        );
+            .file_name()
+            .to_string_lossy()
+            .contains("-day-")));
+        let old_daily = dir.join("workbench-day-1.sqlite3");
+        fs::write(&old_daily, "old backup").unwrap();
+        database(&conn, &app, false, false).unwrap();
+        assert_eq!(fs::read_to_string(old_daily).unwrap(), "old backup");
         let before_delete = Connection::open(dir.join("workbench-before-delete.sqlite3")).unwrap();
         assert_eq!(
             before_delete
@@ -190,7 +168,6 @@ mod tests {
         );
         drop(before_delete);
         drop(latest);
-        drop(daily);
         drop(conn);
         fs::remove_dir_all(base).unwrap();
     }

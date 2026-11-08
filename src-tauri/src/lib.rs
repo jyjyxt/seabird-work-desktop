@@ -4,6 +4,7 @@ mod backup;
 mod bridge;
 mod cli;
 mod content;
+mod image_generation;
 mod interactive;
 mod setup;
 mod workspace;

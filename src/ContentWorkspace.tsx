@@ -406,7 +406,7 @@ export default function ContentWorkspace({ view, root, desktop, agentRunning, ag
     const current = kind === 'articles' ? article : material;
     const snapshot = kind === 'articles' ? articleSnapshot.current : materialSnapshot.current;
     if (current && JSON.stringify(current) !== snapshot && !window.confirm(kind === 'articles' ? t('文章有未保存的修改，确定放弃吗？') : t('素材有未保存的修改，确定放弃吗？'))) return;
-    if (!onAgent(kind === 'articles' ? t('写一篇文章，参考：') : t('添加一个素材，参考：'), undefined, undefined, true, true)) return;
+    if (!onAgent(kind === 'articles' ? t('写一篇文章，参考：') : t('添加一个素材，关于：'), undefined, undefined, true, true)) return;
     editorEpoch.current++;
     if (kind === 'articles') { if (article && articleEditor.current && parkedArticles.current.has(articleEditor.current)) parkedArticles.current.set(articleEditor.current, JSON.parse(articleSnapshot.current)); articleEditor.current = ''; setArticle(null); setArticleUndo(null); articleSnapshot.current = ''; }
     else { setMaterial(null); setViewedMaterial(null); materialSnapshot.current = ''; }
@@ -417,13 +417,13 @@ export default function ContentWorkspace({ view, root, desktop, agentRunning, ag
     const initial = material;
     const initialDirty = dirty;
     const epoch = editorEpoch.current;
-    onAgent('请帮我整理这条素材。\n\n我的要求：', () => {
+    onAgent(material.id === 0 ? t('添加一个素材，关于：') : '请帮我整理这条素材。\n\n我的要求：', () => {
       const sameEditor = editorEpoch.current === epoch && liveEditor.current.material;
       const current = sameEditor || initial;
       const unsaved = sameEditor ? JSON.stringify(current) !== materialSnapshot.current : initialDirty;
       if (!current.id || unsaved) return { text: `${current.id ? `这条素材已保存的记录 ID 为 ${current.id}，但以下是页面上尚未保存的修改；` : ''}请先讨论和整理，不要写入或覆盖任何记录，直到用户明确要求。请保留准确来源和附件。\n\n当前内容：\n${JSON.stringify(current)}` };
       return { text: `请读取并整理 Seabird 中 ID 为 ${current.id} 的素材，保留原有附件和准确来源，按用户要求修改并保存。` };
-    });
+    }, undefined, material.id === 0, material.id === 0);
   };
   return <div className="content-workspace" hidden={!visible}>
       <fieldset className="content-page content-fieldset" disabled={saving}>

@@ -386,7 +386,7 @@ export default function ContentWorkspace({ view, root, desktop, agentRunning, ag
     if (!article) return;
     if (!article.id || dirty || autoSaving) { setError(t("请先保存文章，再生成封面。")); return; }
     const id = article.id;
-    onAgent('请根据这篇文章生成一张适合作为封面的图片。', () => ({ text: `用户明确要求为工作目录 ${JSON.stringify(root)} 中 ID 为 ${id} 的文章生成并绑定封面。请先运行 Seabird CLI 的 --help 并读取文章完整内容，优先使用内置图片生成工具，然后使用 content import-media 将生成文件导入当前工作目录。如果内置图片生成工具不可用，使用 content generate-image 和包含 prompt 的 JSON 文件生成并导入图片；该命令会使用本机 Codex 已配置的服务及凭据，不要读取、输出或传递密钥。重新读取文章并以读取到的完整对象为 expected，仅将文章的 cover 字段设为导入返回的图片对象，再调用 content save-article 保存。保留正文、标签、版本和关联素材。如果无法生成图片，请说明原因，不要假装完成。` }), undefined, true);
+    onAgent('请根据这篇文章生成一张适合作为封面的图片。', () => ({ text: `用户明确要求为工作目录 ${JSON.stringify(root)} 中 ID 为 ${id} 的文章生成并绑定封面。请先运行 Seabird CLI 的 --help 并读取文章完整内容，优先使用内置图片生成工具，然后使用 content import-media 将生成文件导入当前工作目录。如果内置图片生成工具不可用，使用 content generate-image 和包含 prompt 的 JSON 文件生成并导入图片；该命令会使用本机 Codex 已配置的服务及凭据，不要读取、输出或传递密钥。重新读取文章并以读取到的完整对象为 expected，仅将文章的 cover 字段设为导入返回的图片对象，再调用 content save-article 保存。保留正文、标签、版本和关联素材。如果无法生成图片，请说明原因，不要假装完成。` }), undefined, true, true);
   };
   const filter = (text: string) => text.toLowerCase().includes(search.trim().toLowerCase());
   const tagsFor = (value: string) => !selectedTag || parseTags(value).some(tag => tag.toLowerCase() === selectedTag.toLowerCase());

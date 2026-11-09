@@ -19,6 +19,7 @@ import bilibiliIcon from './assets/platforms/bilibili.svg';
 import douyinIcon from './assets/platforms/douyin.svg';
 import mediumIcon from './assets/platforms/medium.svg';
 import telegramIcon from './assets/platforms/telegram.svg';
+import { useTransientMessage } from './useTransientMessage';
 
 type Kind = 'article' | 'image' | 'video';
 type Platform = { id: number; name: string; image_url: string; url: string; types: Kind[]; enabled?: boolean };
@@ -81,8 +82,8 @@ export default function SocialPlatforms({ desktop, mode, onLookup, onStopLookup,
   const [busy, setBusy] = useState(false);
   const [lookingUp, setLookingUp] = useState(false);
   const [showDetails, setShowDetails] = useState(false);
-  const [feedback, setFeedback] = useState('');
-  const [error, setError] = useState('');
+  const [feedback, setFeedback] = useTransientMessage();
+  const [error, setError] = useTransientMessage();
   const load = async () => {
     if (!desktop && localStorage.getItem(previewKey) === null) {
       localStorage.setItem(previewKey, JSON.stringify(previewDefaults));

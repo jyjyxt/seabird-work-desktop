@@ -10,7 +10,7 @@ export type ArticleTarget = {
   draft?: Article;
   selection?: { start: number; end: number; text: string };
 };
-export type AgentContext = { text: string; article?: ArticleTarget };
+export type AgentContext = { text: string; article?: ArticleTarget; cover?: { root: string; id: number; original: Article['cover']; canApply: () => boolean } };
 export type ArticleEdit = { body: string; title?: string };
 
 export function parseArticleEdit(text: string): { text: string; edit: ArticleEdit | null } {

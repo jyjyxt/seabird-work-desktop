@@ -4,6 +4,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { CalendarDays, ChevronLeft, ChevronRight, Plus, Trash2 } from 'lucide-react';
 import './calendar.css';
 import { calendarDateKey as dateKey, calendarLocalInput as localInput, calendarMonthDays, parseCalendarLocalInput } from './calendarDate';
+import { useTransientMessage } from './useTransientMessage';
 
 type Article = { id: number; title: string };
 type Publication = { id: number; article_id: number; article_title: string; published_at: number };
@@ -28,13 +29,8 @@ export default function PublicationCalendar({ root, desktop, articles, initialAr
   const [loading, setLoading] = useState(true);
   const [working, setWorking] = useState(false);
   const busyRef = useRef(false);
-  const [error, setError] = useState('');
-  const [notice, setNotice] = useState('');
-  useEffect(() => {
-    if (!notice) return;
-    const timer = window.setTimeout(() => setNotice(''), 10_000);
-    return () => window.clearTimeout(timer);
-  }, [notice]);
+  const [error, setError] = useTransientMessage();
+  const [notice, setNotice] = useTransientMessage();
   const [form, setForm] = useState<Form | null>(() => initialArticleId ? { articleId: String(initialArticleId), dateTime: localInput(now), original: null } : null);
   useEffect(() => { if (initialArticleId) onConsumed(); }, []);
   const load = async () => desktop ? await invoke<Publication[]>('publication_list', { root }) : previewLoad(root, articles);

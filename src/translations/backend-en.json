@@ -1,5 +1,8 @@
 {
   "exact": {
+    "封面已被修改，请检查后重新生成。": "The cover has changed. Check it and generate again.",
+    "生成的文件不是图片，请重试。": "The generated file is not an image. Please try again.",
+    "文章不存在，请刷新后重试。": "The article no longer exists. Refresh and try again.",
     "链接格式不正确": "Invalid link format",
     "请使用 http 或 https 链接": "Use an HTTP or HTTPS link",
     "无法打开链接，请检查浏览器设置": "Couldn't open the link. Check your browser settings",

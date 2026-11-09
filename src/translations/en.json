@@ -509,5 +509,10 @@
   "找不到原文章，可能已被删除。": "The original article could not be found. It may have been deleted.",
   "当前文章有未保存的修改，切换文章将丢失这些修改，确定继续吗？": "The current article has unsaved changes. Switch articles and discard them?",
   "已取消切换文章。": "Article switch cancelled.",
-  "正在读取文章，请稍后再试。": "Loading articles. Please try again shortly."
+  "正在读取文章，请稍后再试。": "Loading articles. Please try again shortly.",
+  "文章已切换或有未保存的修改，请保存后重新生成封面。": "The article changed or has unsaved edits. Save it and generate the cover again.",
+  "没有收到生成图片的文件路径，请重试。": "The generated image path was not returned. Please try again.",
+  "封面已保存到文章": "Cover saved to article",
+  "封面已保存，但备份失败：{0}": "Cover saved, but backup failed: {0}",
+  "封面未能保存：{0}": "Could not save the cover: {0}"
 }

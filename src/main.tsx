@@ -13,6 +13,8 @@ import SocialPlatforms from './SocialPlatforms';
 import AgentPicker from './AgentPicker';
 import { parseSaveSuggestions, type SaveSuggestion } from './saveSuggestions';
 import { linkSavedArticle, parseArticleEdit, type AgentContext, type ArticleEdit, type ArticleTarget } from './articleAgent';
+import { useTransientMessage } from './useTransientMessage';
+import { generatedCoverPath, hideGeneratedCoverBlock, saveGeneratedCover } from './generatedCover';
 
 type Entry = { name: string; path: string; is_dir: boolean };
 type Agent = { id: string; path: string | null };
@@ -67,7 +69,7 @@ function App() {
   const [result, setResult] = useState<Result | null>(null);
   const [dbPath, setDbPath] = useState('');
   const [backupPath, setBackupPath] = useState('');
-  const [notice, setNotice] = useState('');
+  const [notice, setNotice] = useTransientMessage();
   const [busy, setBusy] = useState(false);
   const [selectedAgent, setSelectedAgent] = useState('codex');
   const [prompt, setPrompt] = useState('');
@@ -89,6 +91,7 @@ function App() {
   const [articleContextTitle, setArticleContextTitle] = useState('');
   const articleApply = useRef<((target: ArticleTarget, edit: ArticleEdit, onUndo: () => void) => string | null) | null>(null);
   const activeArticleTarget = useRef<ArticleTarget | null>(null);
+  const activeCover = useRef<{ target: NonNullable<AgentContext['cover']>; output: string } | null>(null);
   const setArticleContext = useCallback((context: (() => AgentContext) | null, title?: string) => { articleContext.current = context; setArticleContextAvailable(!!context); setArticleContextTitle(title || ''); }, []);
   const setArticleApply = useCallback((apply: ((target: ArticleTarget, edit: ArticleEdit, onUndo: () => void) => string | null) | null) => { articleApply.current = apply; }, []);
   const [conversations, setConversations] = useState<Conversation[]>([]);
@@ -144,7 +147,7 @@ function App() {
   const [agentRunning, setAgentRunning] = useState(false);
   const [savingSuggestion, setSavingSuggestion] = useState('');
   const savingSuggestionRef = useRef(false);
-  const [suggestionError, setSuggestionError] = useState('');
+  const [suggestionError, setSuggestionError] = useTransientMessage();
   const [agentPanelOpen, setAgentPanelOpen] = useState(false);
   useEffect(() => { if (agentPanelOpen && followTranscript.current && transcriptRef.current) transcriptRef.current.scrollTop = transcriptRef.current.scrollHeight; }, [agentOutput, messages, agentRunning, agentPanelOpen, conversationId]);
   useEffect(() => { followTranscript.current = true; if (transcriptRef.current) transcriptRef.current.scrollTop = transcriptRef.current.scrollHeight; }, [conversationId]);
@@ -237,12 +240,32 @@ function App() {
         else lookup.resolve(lookup.output);
         return;
       }
+      if (activeCover.current && data.kind === 'output') activeCover.current.output += data.text;
       const current = conversationIdRef.current;
       if (data.kind === 'output' || data.kind === 'activity') updateConversation(current, c => { const messages = appendMessage(c.messages || [], data.kind === 'output' ? 'assistant' : 'activity', data.text, true); if (data.kind === 'output' && activeArticleTarget.current) messages[messages.length - 1] = { ...messages[messages.length - 1], articleTarget: activeArticleTarget.current }; return { ...c, messages }; });
       else if (data.kind === 'session') updateConversation(current, c => ({ ...c, sessionId: data.text }));
       else if (data.kind === 'request') { setAgentPanelOpen(true); try { const incoming = JSON.parse(data.text) as AgentRequest; setRequests(previous => previous.some(r => r.key === incoming.key) ? previous : [...previous, incoming]); } catch { setNotice(t("无法读取 Agent 请求")); } }
       else if (data.kind === 'request_resolved') { setRequests(previous => previous.filter(r => r.key !== data.text)); }
       else {
+        const cover = activeCover.current;
+        activeCover.current = null;
+        if (cover && data.kind === 'done' && !stopRequested.current) {
+          setRequests([]);
+          setStoppingAgent(false);
+          void (async () => {
+            try {
+              const path = generatedCoverPath(cover.output);
+              if (!path) throw new Error(t('没有收到生成图片的文件路径，请重试。'));
+              const warning = await saveGeneratedCover(cover.target, path, invoke);
+              updateConversation(current, c => ({ ...c, messages: appendMessage(c.messages || [], 'system', warning ? t('封面已保存，但备份失败：{0}', tError(warning)) : t('封面已保存到文章')) }));
+            } catch (error) {
+              updateConversation(current, c => ({ ...c, messages: appendMessage(c.messages || [], 'system', t('封面未能保存：{0}', tError(error))) }));
+            } finally {
+              stopRequested.current = false; activeRun.current = ''; activeArticleTarget.current = null; setAgentRunning(false);
+            }
+          })();
+          return;
+        }
         if (stopRequested.current || data.kind === 'error') updateConversation(current, c => ({ ...c, messages: appendMessage(c.messages || [], 'system', stopRequested.current ? '任务已停止' : data.text) }));
         setRequests([]);
         stopRequested.current = false;
@@ -325,6 +348,7 @@ function App() {
     const current = conversation;
     activeRun.current = runId; stopRequested.current = false;
     activeArticleTarget.current = attachedContext?.article || null;
+    activeCover.current = attachedContext?.cover ? { target: attachedContext.cover, output: '' } : null;
     followTranscript.current = true;
     const referenceText = references.length ? references.map(item => `${item.kind === 'article' ? '文章' : '素材'} ID ${item.id}：${JSON.stringify(item.title)}`).join('\n') : '';
     const displayReferences = references.map(item => `${item.kind === 'article' ? t('文章') : t('素材')} ID ${item.id}: ${JSON.stringify(item.title)}`).join('\n');
@@ -332,7 +356,7 @@ function App() {
     setPrompt(''); setTaskSuggestion(''); taskContext.current = null; setSelectedText(''); setReferences([]); setReferencePickerOpen(false); setReferenceSearch('');
     setAgentRunning(true);
     try { const context = `\n\nSeabird 可执行文件：${JSON.stringify(executablePath)}；工作目录：${JSON.stringify(root)}。如需读取或保存 Seabird 素材和文章，请先运行该程序的 --help，使用 content 命令。读取完整内容后再修改，更新时提供读取到的原始对象作为 expected，保留未要求修改的字段。保存后报告内容 ID；若有备份警告请告知用户。整理素材时保留原文或官方页面链接，以及已知的图片和视频原始链接，分别保存到 url、image_url 和 video_url；没有可靠链接时留空，不要猜测。默认不下载图片或视频，只有用户明确要求下载或完成任务确实需要本地文件时才下载。\n\n${attachedContext?.article ? `当前任务指向正在编辑的文章，不要将该文章建议保存为新文章。需要修改文章时，在正常回复后附加以下代码块，让用户确认应用：\n\`\`\`seabird-edit\n{"body":"${attachedContext.article.selection ? '仅选中文字的完整替换内容' : '修改后的完整正文'}"${attachedContext.article.selection ? '' : ',"title":"文章的完整标题"'}}\n\`\`\`\n正文必须使用 JSON 字符串编码。只在用户需要修改时返回此代码块。${attachedContext.article.selection ? '不要修改选区之外的内容。' : '保留未要求修改的正文和附件引用。'}` : `如果本次对话产生了值得作为新素材或新文章保存的具体内容，且尚未保存，请在正常回复之后附加一个代码块，供用户选择是否保存。不要为了凑代码块而建议保存普通问答、执行过程或空泛建议；不要把已保存的内容再次建议保存。代码块格式必须严格为：\n\`\`\`seabird-save\n[{"kind":"material","title":"标题","body":"完整素材内容","source":"准确来源或空字符串","url":"原文或官方页面链接或空字符串","image_url":"图片链接或空字符串","video_url":"视频链接或空字符串","tags":"逗号分隔的标签或空字符串"}]\n\`\`\`\nkind 只能是 material 或 article；文章的 body 是完整原稿。可放多个独立建议，最多 5 个。内容必须足以直接保存，不要虚构来源或链接。用户明确要求直接保存或修改时，仍按用户要求执行。`}`; await invoke('start_interactive', { root, id: current.agent, prompt: task + (referenceText ? `\n\n用户引用了以下内容，请读取后结合用户要求处理：\n${referenceText}` : '') + (attachedContext ? `\n\n${attachedContext.text}` : '') + context, runId, sessionId: current.sessionId || null }); }
-    catch (e) { if (activeRun.current === runId) { activeRun.current = ''; activeArticleTarget.current = null; setAgentRunning(false); } updateConversation(current.id, c => ({ ...c, messages: appendMessage(c.messages || [], 'system', t('启动失败：{0}', tError(e))) })); fail(e); }
+    catch (e) { if (activeRun.current === runId) { activeRun.current = ''; activeArticleTarget.current = null; activeCover.current = null; setAgentRunning(false); } updateConversation(current.id, c => ({ ...c, messages: appendMessage(c.messages || [], 'system', t('启动失败：{0}', tError(e))) })); fail(e); }
   };
   const lookupPlatform = async (url: string): Promise<{ name: string; image_url: string }> => {
     if (!desktop || !root) throw new Error(t("请在桌面应用中使用 Agent，或手动填写。"));
@@ -494,7 +518,8 @@ function App() {
           {agentOutput && <div className="chat-message chat-legacy"><pre>{agentOutput}</pre></div>}
           {messages.map((message, index) => {
             if (message.role === 'activity') return <details className="chat-activity" key={index}><summary>{t("执行过程")}</summary><pre>{message.text}</pre></details>;
-            const articleEdit = message.role === 'assistant' && message.articleTarget ? parseArticleEdit(message.text) : { text: message.text, edit: null };
+            const displayText = message.role === 'assistant' ? hideGeneratedCoverBlock(message.text) : message.text;
+            const articleEdit = message.role === 'assistant' && message.articleTarget ? parseArticleEdit(displayText) : { text: displayText, edit: null };
             const parsed = message.role === 'assistant' && !message.articleTarget ? parseSaveSuggestions(articleEdit.text) : { text: articleEdit.text, suggestions: [] };
             return <div className={`chat-message chat-${message.role}`} key={index}><div className="chat-label">{message.role === 'user' ? t("你") : message.role === 'assistant' ? (agentInfo[currentConversation?.agent || '']?.name || 'Agent') : t("状态")}</div>{parsed.text && <pre>{parsed.text}</pre>}{parsed.suggestions.map((suggestion, suggestionIndex) => {
               const saved = message.savedSuggestions?.[suggestionIndex];

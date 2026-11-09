@@ -4,6 +4,7 @@ import { convertFileSrc, invoke } from '@tauri-apps/api/core';
 import { open } from '@tauri-apps/plugin-dialog';
 import { Heading2, Heading3, ImagePlus, Sparkles, Video } from 'lucide-react';
 import { articleHtml, articleMarkdown, articleMediaLink, mediaFileUrl } from './articleFormat';
+import { useTransientMessage } from './useTransientMessage';
 
 type MediaFile = { path: string; name: string; kind: 'image' | 'video' };
 type Props = { root: string; desktop: boolean; title: string; body: string; preview: boolean; onTitle: (value: string) => void; onBody: (value: string) => void; onBusy: (busy: boolean) => void; onMessage: (value: string) => void; onError: (value: string) => void; onOpenLink: (url: string) => void; isCurrent: () => boolean; onEditSelection: (selection: { start: number; end: number; text: string }, body: string) => void };
@@ -16,7 +17,7 @@ export default function ArticleEditor({ root, desktop, title, body, preview, onT
   const [hasSelection, setHasSelection] = useState(false);
   const [mediaPicker, setMediaPicker] = useState<{ kind: 'image' | 'video'; range: { start: number; end: number }; body: string } | null>(null);
   const [mediaUrl, setMediaUrl] = useState('');
-  const [mediaError, setMediaError] = useState('');
+  const [mediaError, setMediaError] = useTransientMessage();
   useEffect(() => { if (preview) { setHasSelection(false); setMediaPicker(null); setMediaError(''); } }, [preview]);
   const selection = () => ({ start: input.current?.selectionStart ?? currentBody.current.length, end: input.current?.selectionEnd ?? currentBody.current.length });
   const insert = (text: string, range = selection(), block = false) => {

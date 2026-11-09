@@ -22,3 +22,12 @@ export function isSavedArticle(submitted: Article, saved: Article, desktop: bool
 export function mergeSavedArticle(current: Article, submitted: Article, saved: Article): Article {
   return JSON.stringify(current) === JSON.stringify(submitted) ? saved : { ...current, updated_at: saved.updated_at };
 }
+
+// Merge an externally generated cover only if neither side changed the other's fields.
+export function mergeExternalCover(current: Article, previous: Article, latest: Article): Article | null {
+  if (current.id !== previous.id || latest.id !== previous.id) return null;
+  if (JSON.stringify(current.cover) !== JSON.stringify(previous.cover)) return null;
+  const withoutCover = (article: Article) => ({ ...article, cover: null, updated_at: '' });
+  if (JSON.stringify(withoutCover(previous)) !== JSON.stringify(withoutCover(latest))) return null;
+  return { ...current, cover: latest.cover, updated_at: latest.updated_at };
+}

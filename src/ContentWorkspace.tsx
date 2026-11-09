@@ -8,7 +8,7 @@ import './content.css';
 import ArticleEditor from './ArticleEditor';
 import PublicationCalendar from './PublicationCalendar';
 import SocialPlatforms from './SocialPlatforms';
-import { canAutoSaveArticle, isSavedArticle, mergeSavedArticle, startArticleAutoSave, type Article } from './articleAutoSave';
+import { canAutoSaveArticle, isSavedArticle, mergeExternalCover, mergeSavedArticle, startArticleAutoSave, type Article } from './articleAutoSave';
 import { applyArticleEdit, findArticleForSuggestion, resolveArticleSelection, undoArticleEdit, type AgentContext, type ArticleEdit, type ArticleTarget } from './articleAgent';
 
 export type ContentView = 'home' | 'materials' | 'articles' | 'calendar' | 'discover';
@@ -18,7 +18,7 @@ type ArticleUndo = { root: string; editor: string; before: Article; after: Artic
 type ContentTag = { kind: 'article' | 'material'; name: string; count: number };
 type ContentData = { materials: Material[]; articles: Article[]; tags: ContentTag[] };
 type SaveResult = { id: number; backup_warning: string | null };
-type Props = { view: string; root: string; desktop: boolean; agentRunning: boolean; agentSetupNeeded: boolean; onAgentSettings: () => void; onReferenceMaterials: (materials: { id: number; title: string }[]) => boolean; onNavigate: (view: ContentView) => void; onDirty: (dirty: boolean) => void; onBusy: (busy: boolean) => void; onAgent: (prompt: string, context?: () => AgentContext, selectedText?: string, prefill?: boolean, newSession?: boolean) => boolean; onArticleContext: (context: (() => AgentContext) | null) => void; onArticleApply: (apply: ((target: ArticleTarget, edit: ArticleEdit, onUndo: () => void) => string | null) | null) => void; onDraftSaved: (root: string, editor: string, id: number) => void };
+type Props = { view: string; root: string; desktop: boolean; agentRunning: boolean; agentSetupNeeded: boolean; onAgentSettings: () => void; onReferenceMaterials: (materials: { id: number; title: string }[]) => boolean; onNavigate: (view: ContentView) => void; onDirty: (dirty: boolean) => void; onBusy: (busy: boolean) => void; onAgent: (prompt: string, context?: () => AgentContext, selectedText?: string, prefill?: boolean, newSession?: boolean, contextTitle?: () => string) => boolean; onArticleContext: (context: (() => AgentContext) | null, title?: string) => void; onArticleApply: (apply: ((target: ArticleTarget, edit: ArticleEdit, onUndo: () => void) => string | null) | null) => void; onDraftSaved: (root: string, editor: string, id: number) => void };
 const emptyMaterial = (): Material => ({ id: 0, title: '', source: '', url: '', image_url: '', video_url: '', note: '', tags: '', media: [], updated_at: '' });
 const emptyArticle = (material_ids: number[] = []): Article => ({ id: 0, title: '', body: '', tags: '', versions: {}, material_ids, cover: null, updated_at: '' });
 const parseTags = (value: string = '') => [...new Map(value.split(/[,，\r\n]/).map(tag => tag.trim()).filter(Boolean).map(tag => [tag.toLowerCase(), tag])).values()];
@@ -122,7 +122,27 @@ export default function ContentWorkspace({ view, root, desktop, agentRunning, ag
   liveEditor.current = { article, material, platform, view, root };
   const [saving, setSaving] = useState(false);
   const [autoSaving, setAutoSaving] = useState(false);
+  const [refreshingAfterAgent, setRefreshingAfterAgent] = useState(false);
+  const refreshAfterAgentRef = React.useRef(false);
+  if (agentRunning) refreshAfterAgentRef.current = true;
+  React.useLayoutEffect(() => { if (!refreshingAfterAgent) refreshAfterAgentRef.current = false; }, [refreshingAfterAgent]);
   const [autoSaved, setAutoSaved] = useState(false);
+  const [autoSavedAt, setAutoSavedAt] = useState(0);
+  const [saveClock, setSaveClock] = useState(0);
+  useEffect(() => {
+    if (!autoSaved || !autoSavedAt) return;
+    const elapsed = Math.max(0, Date.now() - autoSavedAt);
+    const timer = window.setTimeout(() => setSaveClock(Date.now()), 60_000 - elapsed % 60_000);
+    return () => window.clearTimeout(timer);
+  }, [autoSaved, autoSavedAt, saveClock]);
+  const autoSaveLabel = () => {
+    const minutes = Math.floor(Math.max(0, saveClock - autoSavedAt) / 60_000);
+    if (minutes < 1) return t('刚刚保存');
+    const unit = minutes < 60 ? 'minute' : minutes < 1440 ? 'hour' : 'day';
+    const amount = unit === 'minute' ? minutes : unit === 'hour' ? Math.floor(minutes / 60) : Math.floor(minutes / 1440);
+    const elapsed = new Intl.RelativeTimeFormat(language === 'zh' ? 'zh-CN' : 'en', { numeric: 'always' }).format(-amount, unit);
+    return t('{0}保存', elapsed);
+  };
   const autoSavingRef = React.useRef(false);
   const autoSavePaused = React.useRef(false);
   const savingRef = React.useRef(saving);
@@ -150,9 +170,9 @@ export default function ContentWorkspace({ view, root, desktop, agentRunning, ag
     return { article: target, text: `当前正在编辑这篇文章。以下是页面上的最新内容（可能尚未保存），所有修改默认针对这篇文章，不要创建新文章或直接写入数据库，除非用户明确要求。${selection ? '用户选中了一段文字，只修改选中部分；不要包含其他内容。' : '用户要求修改时，只修改有要求的部分，并保留其他正文、图片和视频。'}\n标题：${JSON.stringify(title)}\n正文：${JSON.stringify(body)}\n关联素材 ID：${current.article.material_ids.join('、') || '无'}。需要使用这些素材时请读取完整内容。${selection ? `\n选中文字：${JSON.stringify(selection.text)}` : ''}` };
   };
   useEffect(() => {
-    onArticleContext(view === 'articles' && article ? () => articleContext() : null);
+    onArticleContext(view === 'articles' && article ? () => articleContext() : null, article?.title.trim() || t('未命名文章'));
     return () => onArticleContext(null);
-  }, [view, article, platform, root, editorIdentity, onArticleContext]);
+  }, [view, article, platform, root, editorIdentity, language, onArticleContext]);
   useEffect(() => {
     onArticleApply((target, edit, onUndo) => {
       const current = liveEditor.current;
@@ -214,12 +234,24 @@ export default function ContentWorkspace({ view, root, desktop, agentRunning, ag
   useEffect(() => {
     const shouldRefresh = previousState.current.agentRunning && !agentRunning;
     previousState.current = { view, agentRunning };
-    if (!shouldRefresh || !visible || !root) return;
+    if (!shouldRefresh) return;
+    if (!visible || !root) { refreshAfterAgentRef.current = false; return; }
+    refreshAfterAgentRef.current = true; setRefreshingAfterAgent(true);
+    const generation = editorEpoch.current;
     void load().then(fresh => {
-      if (!fresh) return;
-      setArticle(current => { if (!current || !current.id || JSON.stringify(current) !== articleSnapshot.current) return current; const latest = fresh.articles.find(a => a.id === current.id); if (!latest) return current; articleSnapshot.current = JSON.stringify(latest); return latest; });
+      if (!fresh || activeRoot.current !== root || editorEpoch.current !== generation) return;
+      setArticle(current => {
+        if (!current || !current.id || !articleSnapshot.current) return current;
+        const latest = fresh.articles.find(a => a.id === current.id);
+        if (!latest) return current;
+        const previous = JSON.parse(articleSnapshot.current) as Article;
+        const merged = JSON.stringify(current) === articleSnapshot.current ? latest : mergeExternalCover(current, previous, latest);
+        if (!merged) return current;
+        articleSnapshot.current = JSON.stringify(latest);
+        return merged;
+      });
       setMaterial(current => { if (!current || !current.id || JSON.stringify(current) !== materialSnapshot.current) return current; const latest = fresh.materials.find(m => m.id === current.id); if (!latest) return current; materialSnapshot.current = JSON.stringify(latest); return latest; });
-    });
+    }).finally(() => setRefreshingAfterAgent(false));
   }, [view, agentRunning]);
   useEffect(() => {
     const warn = (event: BeforeUnloadEvent) => { if (anyDirty) { event.preventDefault(); event.returnValue = ''; } };
@@ -289,7 +321,7 @@ export default function ContentWorkspace({ view, root, desktop, agentRunning, ag
     else { setArticle(null); setArticleUndo(null); articleSnapshot.current = ''; }
   };
   const saveCurrent = async () => {
-    if (!edit || saving || savingRef.current || autoSavingRef.current) return;
+    if (!edit || saving || savingRef.current || autoSavingRef.current || (view === 'articles' && (agentRunning || refreshAfterAgentRef.current))) return;
     savingRef.current = true; setSaving(true); setError('');
     const savedEditor = articleEditor.current;
     try {
@@ -310,7 +342,7 @@ export default function ContentWorkspace({ view, root, desktop, agentRunning, ag
   };
   const autoSave = async () => {
     const item = article;
-    if (!root || !canAutoSaveArticle(item, articleSnapshot.current, autoSavePaused.current || savingRef.current || autoSavingRef.current)) return;
+    if (!root || !canAutoSaveArticle(item, articleSnapshot.current, autoSavePaused.current || savingRef.current || autoSavingRef.current || agentRunning || refreshAfterAgentRef.current)) return;
     const generation = editorEpoch.current;
     const isCurrent = () => activeRoot.current === root && editorEpoch.current === generation && liveEditor.current.article?.id === item.id;
     autoSavingRef.current = true; setAutoSaving(true);
@@ -326,7 +358,8 @@ export default function ContentWorkspace({ view, root, desktop, agentRunning, ag
       }
       articleSnapshot.current = JSON.stringify(saved);
       setArticle(current => current && current.id === item.id ? mergeSavedArticle(current, item, saved) : current);
-      setAutoSaved(true);
+      const savedAt = Date.now();
+      setAutoSavedAt(savedAt); setSaveClock(savedAt); setAutoSaved(true);
       if (result.backup_warning) setError(t("文章已自动保存，但备份失败：{0}", tError(result.backup_warning)));
     } catch (e) {
       if (!isCurrent()) return;
@@ -386,7 +419,7 @@ export default function ContentWorkspace({ view, root, desktop, agentRunning, ag
     if (!article) return;
     if (!article.id || dirty || autoSaving) { setError(t("请先保存文章，再生成封面。")); return; }
     const id = article.id;
-    onAgent('请根据这篇文章生成一张适合作为封面的图片。', () => ({ text: `用户明确要求为工作目录 ${JSON.stringify(root)} 中 ID 为 ${id} 的文章生成并绑定封面。请先运行 Seabird CLI 的 --help 并读取文章完整内容，优先使用内置图片生成工具，然后使用 content import-media 将生成文件导入当前工作目录。如果内置图片生成工具不可用，使用 content generate-image 和包含 prompt 的 JSON 文件生成并导入图片；该命令会使用本机 Codex 已配置的服务及凭据，不要读取、输出或传递密钥。重新读取文章并以读取到的完整对象为 expected，仅将文章的 cover 字段设为导入返回的图片对象，再调用 content save-article 保存。保留正文、标签、版本和关联素材。如果无法生成图片，请说明原因，不要假装完成。` }), undefined, true, true);
+    onAgent('请根据这篇文章生成一张适合作为封面的图片。', () => ({ text: `用户明确要求为工作目录 ${JSON.stringify(root)} 中 ID 为 ${id} 的文章生成并绑定封面。请先运行 Seabird CLI 的 --help 并读取文章完整内容，优先使用内置图片生成工具，然后使用 content import-media 将生成文件导入当前工作目录。如果内置图片生成工具不可用，使用 content generate-image 和包含 prompt 的 JSON 文件生成并导入图片；该命令会使用本机 Codex 已配置的服务及凭据，不要读取、输出或传递密钥。重新读取文章并以读取到的完整对象为 expected，仅将文章的 cover 字段设为导入返回的图片对象，再调用 content save-article 保存。保留正文、标签、版本和关联素材。如果无法生成图片，请说明原因，不要假装完成。` }), undefined, true, true, () => article.title.trim() || t('未命名文章'));
   };
   const filter = (text: string) => text.toLowerCase().includes(search.trim().toLowerCase());
   const tagsFor = (value: string) => !selectedTag || parseTags(value).some(tag => tag.toLowerCase() === selectedTag.toLowerCase());
@@ -400,7 +433,7 @@ export default function ContentWorkspace({ view, root, desktop, agentRunning, ag
   const tagFilters = <TagFilters tags={availableTags} selected={selectedTag} onSelect={setSelectedTag} onShowAll={() => { setTagListKind(view === 'materials' ? 'material' : 'article'); setShowTagList(true); }}/>;
   const askAgent = () => {
     if (!article) return;
-    onAgent('请帮我修改这篇文章。\n\n我的要求：', () => articleContext());
+    onAgent('请帮我修改这篇文章。\n\n我的要求：', () => articleContext(), undefined, false, false, () => (articleEditor.current === editorIdentity ? liveEditor.current.article?.title : article.title)?.trim() || t('未命名文章'));
   };
   const startWithAgent = (kind: 'articles' | 'materials') => {
     const current = kind === 'articles' ? article : material;
@@ -423,7 +456,7 @@ export default function ContentWorkspace({ view, root, desktop, agentRunning, ag
       const unsaved = sameEditor ? JSON.stringify(current) !== materialSnapshot.current : initialDirty;
       if (!current.id || unsaved) return { text: `${current.id ? `这条素材已保存的记录 ID 为 ${current.id}，但以下是页面上尚未保存的修改；` : ''}请先讨论和整理，不要写入或覆盖任何记录，直到用户明确要求。请保留准确来源和附件。\n\n当前内容：\n${JSON.stringify(current)}` };
       return { text: `请读取并整理 Seabird 中 ID 为 ${current.id} 的素材，保留原有附件和准确来源，按用户要求修改并保存。` };
-    }, undefined, material.id === 0, material.id === 0);
+    }, undefined, material.id === 0, material.id === 0, () => (editorEpoch.current === epoch ? liveEditor.current.material?.title : initial.title)?.trim() || t('未命名素材'));
   };
   return <div className="content-workspace" hidden={!visible}>
       <fieldset className="content-page content-fieldset" disabled={saving}>
@@ -442,7 +475,7 @@ export default function ContentWorkspace({ view, root, desktop, agentRunning, ag
       {root && view === 'materials' && viewedMaterial && !material && <><div className="content-editor-heading"><button className="content-back" onClick={() => setViewedMaterial(null)}><ArrowLeft size={16}/> {t("返回素材")}</button><button className="content-soft" onClick={() => editMaterial(viewedMaterial)}><Pencil size={14}/> {t("编辑")}</button></div><div className="content-form content-material-detail"><span className="content-kicker">MATERIAL</span><h1>{viewedMaterial.title}</h1>{viewedMaterial.source && <div className="content-detail-meta">{viewedMaterial.source}</div>}{viewedMaterial.tags && <div className="content-row-tags">{parseTags(viewedMaterial.tags).map(tag => <span className="content-tag" key={tag}>{tag}</span>)}</div>}{viewedMaterial.note && <p className="content-detail-note">{viewedMaterial.note}</p>}{viewedMaterial.image_url && <button type="button" className="content-link" onClick={() => void openSource(viewedMaterial.image_url)}><ExternalLink size={13}/> {t("打开图片链接")}</button>}{viewedMaterial.video_url && <button type="button" className="content-link" onClick={() => void openSource(viewedMaterial.video_url)}><ExternalLink size={13}/> {t("打开视频链接")}</button>}{viewedMaterial.media.length > 0 && <div className="content-media-grid">{viewedMaterial.media.map(media => <div key={media.path} className="content-media-item"><MediaPreview media={media}/></div>)}</div>}</div></>}
       {root && view === 'materials' && material && <><div className="content-editor-heading"><button className="content-back" onClick={closeEditor}><ArrowLeft size={16}/> {t("返回素材")}</button><div><button className="content-soft" onClick={askMaterialAgent}><Sparkles size={15}/> {t("协助整理")}</button><button className="content-primary" disabled={saving || !material.title.trim()} onClick={saveCurrent}>{saving ? t("保存中…") : t("保存")}</button></div></div><div className="content-form"><span className="content-kicker">MATERIAL</span><h1>{material.id ? t("素材详情") : t("添加素材")}</h1><label>{t("标题")}<input value={material.title} onChange={e => setMaterial({ ...material, title: e.target.value })} placeholder={t("给素材一个容易记住的名字")} /></label><div className="content-form-row"><label>{t("来源")}<input value={material.source} onChange={e => setMaterial({ ...material, source: e.target.value })} placeholder={t("例如：X、公众号、个人想法")} /></label><label>{t("标签")}<input value={material.tags} onChange={e => setMaterial({ ...material, tags: e.target.value })} placeholder={t("多个标签用逗号分隔")} /></label></div><label>{t("链接")}<input value={material.url} onChange={e => setMaterial({ ...material, url: e.target.value })} placeholder="https://" /></label>{material.url && <><button className="content-link content-copy-source" onClick={() => void openSource(material.url)}><ExternalLink size={13}/> {t("打开链接")}</button><button className="content-link content-copy-source" onClick={async () => { try { await navigator.clipboard.writeText(material.url); setMessage(t("已复制链接")); } catch { setError(t("复制失败，请手动选择链接复制")); } }}><Link2 size={13}/> {t("复制链接")}</button></>}<div className="content-form-row"><label>{t("图片链接")}<input type="url" value={material.image_url} onChange={e => setMaterial({ ...material, image_url: e.target.value })} placeholder="https://"/>{material.image_url && <button type="button" className="content-link" onClick={() => void openSource(material.image_url)}><ExternalLink size={13}/> {t("打开图片链接")}</button>}</label><label>{t("视频链接")}<input type="url" value={material.video_url} onChange={e => setMaterial({ ...material, video_url: e.target.value })} placeholder="https://"/>{material.video_url && <button type="button" className="content-link" onClick={() => void openSource(material.video_url)}><ExternalLink size={13}/> {t("打开视频链接")}</button>}</label></div><label>{t("备注")}<textarea value={material.note} onChange={e => setMaterial({ ...material, note: e.target.value })} placeholder={t("记录内容要点，或写下为什么想收藏它。")} /></label><div className="content-media-heading"><b>{t("图片和视频")}</b><button className="content-soft" disabled={saving} onClick={importMedia}><Plus size={14}/> {t("导入文件")}</button></div><p className="content-media-note">{t("文件会复制到本地素材目录；移除附件或删除素材不会删除文件。支持常见图片和视频格式，单个文件不超过 1 GB。")}</p>{material.media.length > 0 && <div className="content-media-grid">{material.media.map(media => <div key={media.path} className="content-media-item"><MediaPreview media={media}/><button aria-label={t("移除附件 {0}", media.name)} onClick={() => setMaterial({ ...material, media: material.media.filter(m => m.path !== media.path) })}><X size={14}/></button></div>)}</div>}<div className="content-form-bottom"><span>{material.id === 0 ? t("新素材尚未保存") : dirty ? t("有未保存的修改") : t("所有修改已保存")}</span>{material.id > 0 && <button className="content-delete" disabled={saving} onClick={() => void removeItem('material', material.id)}><Trash2 size={14}/> {t("删除素材")}</button>}</div></div></>}
       {root && view === 'articles' && !article && !showTagList && <><div className="content-page-heading content-list-heading"><div><span className="content-kicker">YOUR WRITING</span><h1>{t("文章")}</h1><p>{t("整理想法，写下你的文章。")}</p></div><button className="content-primary" onClick={() => editArticle(emptyArticle())}><Plus size={15}/> {t("新建文章")}</button></div><div className="content-toolbar"><label className="content-search"><Search size={16}/><input value={search} onChange={e => setSearch(e.target.value)} placeholder={t("搜索文章或标签")} /></label><span>{articles.length} {t("篇文章")}</span></div>{tagFilters}{loading ? <div className="content-empty">{t("正在读取文章…")}</div> : articles.length ? <div className="content-article-list">{articles.map(a => <div className="content-article-item" key={a.id}><button className="content-article-row" onClick={() => editArticle(a)}>{a.cover ? <span className="article-cover-thumb"><MediaPreview media={{ ...a.cover, kind: 'image' }}/></span> : <span className="content-row-icon article-icon"><FileText size={18}/></span>}<span className="content-row-copy"><b>{a.title}</b><small>{snippet(a.body) || t("还没有正文")}</small>{parseTags(a.tags).length > 0 && <span className="content-row-tags">{parseTags(a.tags).map(tag => <span className="content-tag" key={tag}>{tag}</span>)}</span>}</span><span className="content-article-meta">{a.material_ids.length} {t("条素材")}<br/>{stamp(a.updated_at)}</span></button><button className="content-article-edit" aria-label={t("编辑文章 {0}", a.title)} onClick={() => editArticle(a, true)}><Pencil size={14}/> {t("编辑")}</button><button className="content-article-list-delete" aria-label={t("删除文章 {0}", a.title)} title={t("删除文章")} onClick={() => void removeItem('article', a.id)}><Trash2 size={14}/></button><button className="content-article-open" aria-label={t("打开文章 {0}", a.title)} title={t("打开文章")} onClick={() => editArticle(a)}><ArrowRight size={15}/></button></div>)}</div> : <div className="content-empty"><FileText size={24}/><strong>{search || selectedTag ? t("没有找到匹配的文章") : t("你的第一篇文章，从这里开始")}</strong><p>{search || selectedTag ? t("试试其他关键词或标签。") : t("从一个想法或一条素材开始。")}</p></div>}</>}
-      {root && view === 'articles' && article && <><div className="content-editor-heading"><button className="content-back" disabled={autoSaving} onClick={closeEditor}><ArrowLeft size={16}/> {t("返回文章")}</button><div><span className="content-save-state">{article.id === 0 ? t("新文章尚未保存") : autoSaving ? t("自动保存中…") : dirty ? t("未保存") : autoSaved ? t("已自动保存") : t("已保存")}</span><button className="content-soft" onClick={() => setArticleEditing(value => !value)}>{articleEditing ? <Eye size={15}/> : <Pencil size={15}/>} {articleEditing ? t("预览") : t("编辑")}</button><button className="content-soft" onClick={askAgent}><Sparkles size={15}/> {t("协助写作")}</button>{articleUndo && <button className="content-soft" onClick={undoAgentEdit}>{t("撤销 Agent 修改")}</button>}<button className="content-primary" disabled={saving || autoSaving || !article.title.trim()} onClick={saveCurrent}>{saving ? t("保存中…") : t("保存")}</button></div></div><div className="content-writing-layout"><div className={`content-writing-main${articleEditing ? ' is-editing' : ''}`}><ArticleEditor key={editorGeneration} root={root} desktop={desktop} title={article.title} body={article.body} preview={!articleEditing} onOpenLink={url => void openSource(url)} onTitle={value => setArticle(current => current ? { ...current, title: value } : current)} onBody={value => setArticle(current => current ? { ...current, body: value } : current)} onEditSelection={(selection, body) => onAgent('请帮我修改选中的内容。\n\n我的要求：', () => articleContext(selection, body), selection.text)} onBusy={setSaving} onMessage={value => { setError(''); setMessage(value); }} onError={value => { setMessage(''); setError(value); }} isCurrent={() => editorEpoch.current === editorGeneration && activeRoot.current === root}/></div><aside className="content-writing-aside"><section className="article-cover"><div className="content-aside-title"><ImagePlus size={15}/><b>{t("文章封面")}</b></div>{article.cover ? <div className="article-cover-image"><MediaPreview media={{ ...article.cover, kind: 'image' }}/></div> : <div className="article-cover-empty"><ImagePlus size={20}/><span>{t("还没有封面")}</span></div>}<div className="article-cover-actions"><button type="button" className="content-soft" onClick={() => void importCover()}>{article.cover ? t("更换图片") : t("选择图片")}</button><button type="button" className="content-soft" disabled={agentRunning} onClick={generateCover}><Sparkles size={14}/> {t("生成封面")}</button>{article.cover && <button type="button" className="content-link" onClick={() => setArticle(current => current ? { ...current, cover: null } : current)}>{t("移除")}</button>}</div></section><div className="content-aside-divider"/><SocialPlatforms desktop={desktop} mode="article" onSettings={onAgentSettings}/><div className="content-aside-divider"/><label className="content-article-tags">{t("标签")}<textarea aria-label={t("文章标签")} rows={3} value={article.tags || ''} onChange={e => setArticle({ ...article, tags: e.target.value })} placeholder={t("多个标签用逗号或换行分隔")} /></label>{article.id > 0 && <div className="content-article-actions"><button className="content-delete" disabled={saving || autoSaving} onClick={() => void removeItem('article', article.id)}><Trash2 size={14}/> {t("删除文章")}</button><button className="content-record-publication" onClick={() => { setCalendarArticleId(article.id); onNavigate('calendar'); }}><CalendarDays size={14}/> {t("记录发布时间")}</button></div>}</aside></div></>}
+      {root && view === 'articles' && article && <><div className="content-editor-heading"><button className="content-back" disabled={autoSaving} onClick={closeEditor}><ArrowLeft size={16}/> {t("返回文章")}</button><div><span className="content-save-state">{article.id === 0 ? t("新文章尚未保存") : autoSaving ? t("自动保存中…") : dirty ? t("未保存") : autoSaved ? autoSaveLabel() : t("已保存")}</span><button className="content-soft" onClick={() => setArticleEditing(value => !value)}>{articleEditing ? <Eye size={15}/> : <Pencil size={15}/>} {articleEditing ? t("预览") : t("编辑")}</button><button className="content-soft" onClick={askAgent}><Sparkles size={15}/> {t("协助写作")}</button>{articleUndo && <button className="content-soft" onClick={undoAgentEdit}>{t("撤销 Agent 修改")}</button>}<button className="content-primary" disabled={saving || autoSaving || agentRunning || refreshingAfterAgent || !article.title.trim()} onClick={saveCurrent}>{saving ? t("保存中…") : t("保存")}</button></div></div><div className="content-writing-layout"><div className={`content-writing-main${articleEditing ? ' is-editing' : ''}`}><ArticleEditor key={editorGeneration} root={root} desktop={desktop} title={article.title} body={article.body} preview={!articleEditing} onOpenLink={url => void openSource(url)} onTitle={value => setArticle(current => current ? { ...current, title: value } : current)} onBody={value => setArticle(current => current ? { ...current, body: value } : current)} onEditSelection={(selection, body) => onAgent('请帮我修改选中的内容。\n\n我的要求：', () => articleContext(selection, body), selection.text)} onBusy={setSaving} onMessage={value => { setError(''); setMessage(value); }} onError={value => { setMessage(''); setError(value); }} isCurrent={() => editorEpoch.current === editorGeneration && activeRoot.current === root}/></div><aside className="content-writing-aside"><section className="article-cover"><div className="content-aside-title"><ImagePlus size={15}/><b>{t("文章封面")}</b></div>{article.cover ? <div className="article-cover-image"><MediaPreview media={{ ...article.cover, kind: 'image' }}/></div> : <div className="article-cover-empty"><ImagePlus size={20}/><span>{t("还没有封面")}</span></div>}<div className="article-cover-actions"><button type="button" className="content-soft" onClick={() => void importCover()}>{article.cover ? t("更换图片") : t("选择图片")}</button><button type="button" className="content-soft" disabled={agentRunning} onClick={generateCover}><Sparkles size={14}/> {t("生成封面")}</button>{article.cover && <button type="button" className="content-link" onClick={() => setArticle(current => current ? { ...current, cover: null } : current)}>{t("移除")}</button>}</div></section><div className="content-aside-divider"/><SocialPlatforms desktop={desktop} mode="article" onSettings={onAgentSettings}/><div className="content-aside-divider"/><label className="content-article-tags">{t("标签")}<textarea aria-label={t("文章标签")} rows={3} value={article.tags || ''} onChange={e => setArticle({ ...article, tags: e.target.value })} placeholder={t("多个标签用逗号或换行分隔")} /></label>{article.id > 0 && <div className="content-article-actions"><button className="content-delete" disabled={saving || autoSaving} onClick={() => void removeItem('article', article.id)}><Trash2 size={14}/> {t("删除文章")}</button><button className="content-record-publication" onClick={() => { setCalendarArticleId(article.id); onNavigate('calendar'); }}><CalendarDays size={14}/> {t("记录发布时间")}</button></div>}</aside></div></>}
       {root && view === 'calendar' && <PublicationCalendar root={root} desktop={desktop} articles={data.articles} initialArticleId={calendarArticleId} onConsumed={() => setCalendarArticleId(null)} onOpenArticle={id => { if (article?.id === id) { onNavigate('articles'); return; } const item = data.articles.find(entry => entry.id === id); if (item) editArticle(item); else setError(t("文章不存在，请刷新后重试。")); }} onBusy={setSaving}/>}
       {root && view === 'discover' && <><div className="content-page-heading"><div><span className="content-kicker">DISCOVER</span><h1>{t("热点发现")}</h1><p>{t("让 Agent 帮你查找值得关注的话题。")}</p></div></div><div className="content-form"><label>{t("关注方向")}<input value={discoverQuery} onChange={e => setDiscoverQuery(e.target.value)} placeholder={t("例如：AI 视频、科技新闻或某个平台")} /></label><button className="content-primary" type="button" onClick={() => onAgent(`请帮我查找${discoverQuery.trim() ? `与“${discoverQuery.trim()}”有关的` : ''}近期值得关注的话题。请标明来源和时间，提供可访问的来源链接；无法验证的信息请明确说明。`, undefined, undefined, true)}><Sparkles size={15}/> {t("让 Agent 查找")}</button></div></>}
     </fieldset>

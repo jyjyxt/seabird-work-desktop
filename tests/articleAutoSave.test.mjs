@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { canAutoSaveArticle, isSavedArticle, mergeSavedArticle, startArticleAutoSave } from '../src/articleAutoSave.ts';
+import { canAutoSaveArticle, isSavedArticle, mergeExternalCover, mergeSavedArticle, startArticleAutoSave } from '../src/articleAutoSave.ts';
 
 const article = { id: 1, title: 'Title', body: 'Original', tags: 'tag', versions: { b: { title: 'B', body: 'b' }, a: { title: 'A', body: 'a' } }, material_ids: [2, 1], cover: null, updated_at: 'before' };
 
@@ -42,4 +42,13 @@ test('checks for changes every 15 seconds and stops when disposed', t => {
   stop();
   t.mock.timers.tick(15_000);
   assert.equal(calls, 2);
+});
+
+test('merges an externally saved cover without losing local edits or overwriting conflicts', () => {
+  const cover = { path: '/image.jpg', name: 'image.jpg', kind: 'image' };
+  const latest = { ...article, cover, updated_at: 'after' };
+  const current = { ...article, body: 'Unsaved changes' };
+  assert.deepEqual(mergeExternalCover(current, article, latest), { ...current, cover, updated_at: 'after' });
+  assert.equal(mergeExternalCover({ ...current, cover }, article, latest), null);
+  assert.equal(mergeExternalCover(current, article, { ...latest, title: 'External change' }), null);
 });
